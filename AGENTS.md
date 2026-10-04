@@ -5,10 +5,12 @@ Working rules for agent sessions and humans changing this code.
 ## What this is
 
 A Rust library that renders WinUI 3 / Fluent 2-flavored XAML with GPUI.
-Currently a feasibility PoC (M0). Read in this order: [PRD.md](PRD.md)
-(requirements, authoritative) → [PLAN.md](PLAN.md) (architecture, dependency
-policy) → [FEASIBILITY.md](FEASIBILITY.md) (PoC evidence, friction list).
-The milestone ladder is PRD §15; do not build past the current milestone.
+Currently a feasibility PoC (M0). Read in this order: [PRD.md](docs/PRD.md)
+(requirements, authoritative) → [MILESTONES.md](docs/MILESTONES.md)
+(feature-level ladder) → [PLAN.md](docs/PLAN.md) (architecture, dependency
+policy) → [FEASIBILITY.md](docs/FEASIBILITY.md) (PoC evidence, friction list).
+The milestone ladder is PRD §15 with its feature-level breakdown in
+MILESTONES.md; do not build past the current milestone.
 
 ## Prime rules
 

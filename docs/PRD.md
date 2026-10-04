@@ -19,7 +19,7 @@ not a WinRT interop. It adopts Microsoft's WinUI 3 semantics as its
 normative contract — including the ones that are easy to get wrong
 (`x:Bind` defaults to OneTime; `UpdateSourceTrigger` for `TextBox.Text` is
 LostFocus; `Converter={x:Null}` is rejected, not crashed on) — because the
-vendored [win-dev-skills](references/win-dev-skills/README.md) define those
+vendored [win-dev-skills](../references/win-dev-skills/README.md) define those
 semantics precisely and we treat them as spec.
 
 **One-line positioning:** "Fluent 2 for Rust, authored in XAML, rendered by
@@ -76,6 +76,12 @@ with identical C# behavior. We are "WinUI-flavored", not "WinUI-compatible"
   engine (§9); raw expression strings are not accepted in XAML. [D]
 - N6 — 3D transforms, perspective, Composition custom geometries beyond
   what gpui paths/SVG support.
+- N7 — MapControl: in WinUI 3 since WinAppSDK 1.5 [V], but it needs an
+  online tile service and a geo stack. Out of scope v1. [D]
+- N8 — Printing: WinUI 3 does ship it (`Microsoft.UI.Xaml.Printing.PrintDocument`
+  + `PrintManagerInterop`, since 0.8) [V], but the pipeline is Windows-only
+  and gpui has no print path. Out of scope v1; a v2 PDF-emission route is
+  the designated evaluation. [D]
 
 ## 4. Platform foundation — verified capability matrix
 
@@ -131,7 +137,7 @@ tracked as an open question for the exclusion-blend acrylic layer (§7.3).
 | `{Binding Path}` | runtime path binding via property registry (tooling/dynamic scenarios) | M3 |
 | `{x:Null}` | valid; **rejected with diagnostic where WinUI crashes** (`Converter={x:Null}`) — parity-with-the-docs exception [D] | M1 |
 | `{TemplateBinding}` | not in v1 (N2) | — |
-| `{x:Static local:Type.Member}` | const fn/value references | M3 |
+| `{x:Static}` | **not a WinUI 3 extension** [V — the official supported-extension list enumerates 8 and omits it]; Rust constants are reached through `{x:Bind}` paths instead | out [D] |
 
 ### 5.3 Resources and styles
 - REQ-RES-01 (Must, M1): `ResourceDictionary`, `x:Key`, merged dictionaries,
@@ -364,9 +370,10 @@ tokens, keyboard support, accesskit role/name, animations per §9.2.
 | Control | Tier | Strategy |
 |---|---|---|
 | Grid (`*`/px/Auto rows+cols) | M2 | taffy grid or flex emulation + WinUI star-sizing pre-pass [D] |
-| StackPanel, WrapPanel, UniformGrid? (via ItemsRepeater layouts) | M2 | flex row/col + wrap |
+| StackPanel, WrapPanel†, UniformGrid? (via ItemsRepeater layouts) | M2 | flex row/col + wrap; †WrapPanel is experimental-only (2.0-exp) in real WinUI 3 [V] — we ship it as a dialect extension [D] |
 | Border, Viewbox, Canvas (absolute) | M2 | styled container; taffy position:absolute |
-| ScrollViewer (pan, zoom) | M2 | gpui scrollable + scrollbars styled to Fluent |
+| ScrollViewer (pan, zoom), ScrollBar (standalone) | M2 | gpui scrollable + scrollbars styled to Fluent; zoom modes, snap points, per-axis chaining, deferred scrolling at M6 [V — ScrollViewer API] |
+| ScrollView / ScrollPresenter (modern API, WinAppSDK 1.4 [V]) | M6 (Should) | same engine, second surface |
 | SplitView, Expander, TwoPaneView | M2 / M6 | split panes; expander animates height (opt-in) per §9.3 |
 | RelativePanel | M6 | constraint solver pre-pass → absolute layout |
 | ItemsRepeater (+ layouts: Stack/Grid/Uniform) | M2 | virtualized list engine core |
@@ -393,10 +400,11 @@ tokens, keyboard support, accesskit role/name, animations per §9.2.
 | Control | Tier | Strategy |
 |---|---|---|
 | ListView / GridView (+ headers, selection modes) | M2 | **virtualized** (uniform_list + variable-height engine); no `ScrollViewer` wrap allowed (lint WX5001) |
+| ListBox (legacy) | M6-C | ListView alias — MS guidance recommends ListView [V] |
 | ItemsView (+ layouts) | M6 | same engine, layout abstraction |
 | TreeView | M6 | virtualized tree (sum-tree lineage in gpui) |
 | FlipView, PipsPager | M6 | paged container + pips |
-| SwipeControl, PullToRefresh | M6/C | gesture-driven; touch-first; desktop-low priority [D] |
+| SwipeControl, RefreshContainer + RefreshVisualizer | M6/C | gesture-driven; touch-first; desktop-low priority [D] |
 
 **Input & selection**
 | Control | Tier | Strategy |
@@ -424,6 +432,7 @@ tokens, keyboard support, accesskit role/name, animations per §9.2.
 | BreadcrumbBar, SelectorBar, Pivot (legacy) | M6 | bar controls; Pivot = SelectorBar compat alias |
 | TitleBar | M2 | custom titlebar via gpui TitlebarOptions; drag region + caption buttons |
 | Window (SystemBackdrop, min size, DPI) | M2 | §7.1 |
+| SystemBackdropElement | M4 | in-app backdrop host element; shipped in WinAppSDK 2.0.1 [V] |
 
 **Media & shapes**
 | Control | Tier | Strategy |
@@ -431,8 +440,10 @@ tokens, keyboard support, accesskit role/name, animations per §9.2.
 | Image (+ ImageBrush, nine-grid?) | M2 | async decode, atlas cache |
 | Shapes (Rectangle, Ellipse, Line, Path, Polygon, Polyline) + Geometry | M2 | gpui Path/SVG tessellation |
 | Icons (Font/Symbol/Path/Bitmap/Image + AnimatedIcon) | M2/M6 | §6, §9.2 |
-| MediaPlayerElement | **out of scope v1** (media stack; revisit) [D] | — |
-| InkCanvas | out (N4) | — |
+| MediaPlayerElement | **out of scope v1** (media stack; revisit) [D] — shipped in real WinUI 3 at 1.2 [V] | — |
+| MapControl | out (N7) | tile service + geo stack [D]; shipped in real WinUI 3 at 1.5 [V] |
+| SwapChainPanel | out v1 | exists in WinUI 3 [V]; no foreign-swapchain hosting in gpui [D] |
+| InkCanvas | out (N4) — experimental-only in stable WinUI 3 [V] | — |
 
 **Cross-cutting control requirements**
 - REQ-CTRL-01 (Must): virtualization mandatory for ListView/GridView/
@@ -575,6 +586,10 @@ the project review; where they ever disagree, this table is authoritative._
 | **M6 — Controls wave 2** | NavigationView, TabView, ComboBox, menus, ContentDialog, InfoBar/TeachingTip, TreeView, ItemsView, pickers/calendar, ColorPicker, NumberBox, AutoSuggestBox, RichTextBlock, SelectorBar/Breadcrumb, Expander, Swipe/PTR (C) | full-catalog gallery ships; per-control a11y + visual-state checklist passes |
 | **M7 — Hardening & DX** | hot reload; editor schema/LSP; `xaml-lint`; i18n/RTL; a11y audit (§14); multi-window; docs | edit-XAML → update < 1 s; audit scorecard 100% Must-items |
 
+Feature-level breakdown — every WinUI 3 feature assigned to a milestone or
+to an explicit-out entry with a reason — lives in
+[MILESTONES.md](MILESTONES.md); it expands this table, never replaces it.
+
 ## 16. Risks & open questions (new/changed only — PLAN.md §6 holds the rest)
 
 | # | Risk / question | Impact | Handling |
@@ -611,3 +626,9 @@ the project review; where they ever disagree, this table is authoritative._
 9. THEME decision record: PLAN.md §1/§6 (gpui-pre `"0.3"` policy, PoC
    history), FEASIBILITY.md (M0 evidence incl. screenshot, exit codes,
    tests). [V]
+10. MS Learn, "XAML overview" (2026-07-27) — the supported markup-extension
+    list (8 extensions; `x:Static` absent); WinUI 3 controls index
+    (2026-09-19) re-verified 2026-10-04 against WASDK 1.0–2.0 release notes
+    for version attributions; x:Uid / x:Load / VSM / ScrollViewer / Frame /
+    PrintDocument / ElementSoundPlayer / SwapChainPanel API pages. [V] —
+    full URL list in MILESTONES.md §7.

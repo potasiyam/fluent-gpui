@@ -74,7 +74,7 @@ ours required on Windows 11 22H2+.
 ## 2. Normative reference: the XAML semantic contract
 
 Microsoft's [win-dev-skills](https://github.com/microsoft/win-dev-skills)
-package (vendored under [`references/win-dev-skills/`](references/win-dev-skills/README.md),
+package (vendored under [`references/win-dev-skills/`](../references/win-dev-skills/README.md),
 MIT, pinned to `2e8c902`) defines what *correct* WinUI 3 XAML means. We treat
 it as the contract our subset implements:
 
