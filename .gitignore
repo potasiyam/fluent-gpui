@@ -1,0 +1,5 @@
+target/
+
+# Full-desktop capture (contains personal context) — local evidence only;
+# replace with a window-only capture before committing any screenshot.
+poc-screenshot.png
