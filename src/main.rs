@@ -23,22 +23,18 @@ struct DemoApp {
     handlers: HashMap<String, HandlerFn>,
 }
 
-/// The text `{x:Bind ClicksText}` resolves to. Shared by the renderer and the
-/// tests so the test exercises the real derivation, not its own copy.
+/// The text `{x:Bind ClicksText}` resolves to; shared by renderer and tests.
 fn clicks_binding_text(clicks: u32) -> String {
     format!("Button clicked {} time(s)", clicks)
 }
 
-/// Asset paths must not depend on the process CWD: `cargo run` happens to set
-/// it to the manifest dir, nothing else does.
+/// Resolved from the manifest dir; the process CWD is not guaranteed.
 fn demo_xaml_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/demo.xaml")
 }
 
 impl Render for DemoApp {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Rebuild bindings from state every frame; the real library replaces
-        // this with a property registry wired to change notifications.
         let mut bindings = HashMap::new();
         bindings.insert(
             "ClicksText".to_string(),
@@ -140,7 +136,6 @@ mod tests {
         let tree = xaml::parse(&src).unwrap();
         let handlers = demo_handlers();
 
-        // Resolve exactly as the renderer does: Button's Click attr -> registry.
         let button = tree.children[0]
             .children
             .iter()
@@ -154,7 +149,6 @@ mod tests {
         handler(&mut state);
         assert_eq!(state.clicks, 2);
 
-        // The shared derivation DemoApp::render feeds into the binding map.
         assert_eq!(
             clicks_binding_text(state.clicks),
             "Button clicked 2 time(s)"

@@ -1,12 +1,8 @@
 //! XAML object model -> GPUI element mapping.
 //!
-//! PoC subset: Page/UserControl, StackPanel, TextBlock, Border, Button.
-//! Every element renders bottom-up into an owned `AnyElement`, which proves
-//! GPUI can host a UI tree built at runtime from markup (its element API is
-//! compile-time-builder-shaped, but `AnyElement` erases that).
-//!
-//! Unsupported constructs warn on stderr instead of failing silently
-//! ("never silently render wrong"); M1 replaces the warnings with real
+//! PoC subset: Page/UserControl, StackPanel, TextBlock, Border, Button,
+//! rendered bottom-up into owned `AnyElement`s. Unsupported constructs warn
+//! on stderr instead of failing silently; M1 replaces the warnings with real
 //! file/line diagnostics (PRD REQ-DIAG-01/02).
 
 use std::collections::HashMap;
@@ -19,12 +15,11 @@ use gpui::{
 
 use crate::xaml::XamlElement;
 
-/// Handler logic registered by the host app, keyed by the `Click="Name"`
-/// attribute value. Deliberately framework-free: it only touches app state.
+/// Host handler keyed by the `Click="Name"` attribute value; it only touches
+/// app state.
 pub type HandlerFn = Arc<dyn Fn(&mut AppState)>;
 
 /// Host state the XAML can reach through `{x:Bind PropertyName}`.
-/// The real library replaces this with a property registry + derive macro.
 #[derive(Default)]
 pub struct AppState {
     pub clicks: u32,
@@ -63,9 +58,8 @@ pub fn render_element(el: &XamlElement, ctx: &XamlContext, path: &str) -> AnyEle
     }
 }
 
-/// Markup extensions are only resolved on `Text`/`Content`; anywhere else the
-/// raw `{…}` value would be silently misparsed downstream (numeric/color
-/// coercion fails), so flag it. Known-unsupported attributes are flagged too.
+/// Warns on known-unsupported attributes and on markup extensions outside
+/// `Text`/`Content` (the only attributes whose extensions get resolved).
 fn warn_unsupported(el: &XamlElement) {
     for attr in UNSUPPORTED_ATTRS {
         if el.attributes.contains_key(*attr) {
@@ -82,8 +76,7 @@ fn warn_unsupported(el: &XamlElement) {
     }
 }
 
-/// WinUI `Visibility` has exactly two values; `Collapsed` removes the element
-/// from layout entirely (its children are not rendered at all).
+/// WinUI `Visibility`: `Collapsed` removes the element from layout entirely.
 fn is_collapsed(el: &XamlElement) -> bool {
     match el.attributes.get("Visibility").map(|v| v.trim()) {
         None => false,
@@ -95,8 +88,6 @@ fn is_collapsed(el: &XamlElement) -> bool {
         }
     }
 }
-
-// --- elements -----------------------------------------------------------
 
 fn container(el: &XamlElement, ctx: &XamlContext, path: &str, is_page: bool) -> AnyElement {
     let vertical = el
@@ -139,7 +130,7 @@ fn text_block(el: &XamlElement, ctx: &XamlContext) -> AnyElement {
         );
     }
     // WinUI's content property for TextBlock is Text; the parser maps inner
-    // text to Content, so accept both spellings.
+    // text to Content.
     let text = resolve_markup(el, "Text", ctx)
         .or_else(|| resolve_markup(el, "Content", ctx))
         .unwrap_or_default();
@@ -231,8 +222,6 @@ fn button(el: &XamlElement, ctx: &XamlContext, path: &str) -> AnyElement {
     apply_common(b, el).into_any_element()
 }
 
-// --- attribute helpers --------------------------------------------------
-
 /// Margin, size, Opacity on any element; keeps the builder generic over
 /// `Styled`.
 fn apply_common<E: Styled>(e: E, el: &XamlElement) -> E {
@@ -263,10 +252,8 @@ fn align_wrap(el: &XamlElement, inner: AnyElement) -> AnyElement {
     .into_any_element()
 }
 
-/// Supports `{x:Bind Path[, Mode=…]}` against the host's binding map: the
-/// first comma-separated token is the path, remaining parameters are ignored
-/// with a warning. Other `{…}` values pass through verbatim (rendered as
-/// literal text).
+/// `{x:Bind Path[, …]}`: the first comma-separated token is the path, other
+/// parameters warn and are ignored. Other `{…}` values pass through verbatim.
 fn resolve_markup(el: &XamlElement, attr: &str, ctx: &XamlContext) -> Option<SharedString> {
     let raw = el.attributes.get(attr)?;
     let t = raw.trim();
