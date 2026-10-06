@@ -7,7 +7,7 @@ that **every WinUI 3 feature maps to exactly one milestone — or to an
 explicit-out entry with a reason** (§4). Nothing here builds past the
 current milestone; it plans the whole surface.
 **Evidence policy:** claims are tagged **[V]** (verified against a source in
-§7), **[D]** (a decision we own), or **[Q]** (open question), per the PRD
+§8), **[D]** (a decision we own), or **[Q]** (open question), per the PRD
 evidence policy. Sources fetched 2026-10-04.
 
 ## 1. What this adds beyond PRD §15
@@ -253,7 +253,53 @@ Counted from PRD §10 after this update (91 named controls/patterns):
 - New WinUI features Microsoft ships (WinAppSDK releases) get a row here in
   the same change that adds them to the catalog — coverage stays provable.
 
-## 7. Evidence sources (fetched 2026-10-04)
+## 7. Anecdotal input — one shipped GPUI Fluent app (non-normative)
+
+Provenance: the project owner's other product is a GPUI settings app whose
+Fluent v2 layer was re-implemented by hand (inventory shared 2026-10-04).
+This is one anecdotal data point, not a validated example: a single app,
+mockup-driven, with product-specific constraints (egui-parity choices,
+hand-fit layout). It is not a requirement source and must not be read as
+one. The ladder (§2) and the PRD requirements are unchanged by this
+section; at most it suggests ordering of work inside a milestone, to be
+re-examined when that milestone actually starts.
+
+### 7.1 What that app hand-rolled, mapped to our ladder (descriptive only)
+
+| Their implementation | Our item | M | Notes we inherit |
+|---|---|---|---|
+| Mica via `DWMWA_SYSTEMBACKDROP_TYPE`, call-and-probe with Win10 fallback | REQ-MAT-01/02 | M4 | call-and-probe (attempt → verify → fall back) is the concrete shape for the REQ-MAT-02 fallback matrix |
+| Accent ramp from `UISettings.GetColorValue`; their fill convention: AccentDark1-based (light) / AccentLight2-based (dark) | REQ-TOK-01 | M1 | candidate idea: read the user's live accent instead of a hardcoded one; their fill convention is unverified against the vendored catalog — evaluate at M1 [Q — anecdotal] |
+| Theme-role mapping from `Common_themeresources_any.xaml` | REQ-TOK-01 | M1 | corroborates the vendored brush catalog as the token source |
+| Custom titlebar: drag region, window-control areas, caption hover states, red close fill | §10 TitleBar | M2 | caption hover incl. red close is the Win11 convention; maps to window-control-area hit regions |
+| Segoe Fluent Icons glyphs, Segoe MDL2 fallback on Win10 | REQ-TOK-04 | M2 | Windows-native fallback chain before any bundled font |
+| Type ramp Segoe UI Variable (Display/Text/Small) + Nirmala UI fallback for Bangla | REQ-TOK-02 | M1 | complex-script fallback chain; gpui shaping covers Bangla (rustybuzz, PRD §4) |
+| Button (default/accent/small/danger), TextBox (underline focus), ToggleSwitch, CheckBox, cards + list rows | §10 M2 rows | M2 | confirms the wave-1 list is the right minimum for a settings app |
+| ComboBox + flyout machinery: anchored, deferred, snap-to-window, occlusion, light-dismiss | §10 ComboBox + overlay layer | M6 | the overlay/floating layer is the load-bearing piece they built by hand — open M6 with it, then ComboBox |
+| NavigationView minimal/expanded pane with pane animation | §10 NavigationView | M6 | the settings-app shell; sequence early inside M6 |
+| Toast pill (success fades / error persists with dismiss), status chips | §10 InfoBar/InfoBadge | M6 | toasts replace status bars in real apps |
+
+### 7.2 What that app never needed
+
+Grid star sizing, Slider, virtualized 100k lists, RichTextBlock, data
+binding — its state wiring is plain Rust and its layout is hand-fit. Read:
+for a settings-app shape, shell + basic inputs + cards + flyouts are the
+critical mass. The M2/M3 machinery still serves every other app shape and
+stays in the ladder. The app also avoided ContentDialog on purpose (inline
+Confirm/Cancel); we still ship ContentDialog at M6 — that choice was
+product-specific.
+
+### 7.3 Possible sequencing signals (non-binding — revisit when the milestone starts)
+
+- M1: evaluate live-from-OS accent ramp vs. static catalog tokens (PRD
+  REQ-TOK-01 notes this as an M1 evaluation).
+- M2: evaluate Segoe MDL2 as a pre-Win11 glyph fallback before bundling a
+  font (PRD REQ-TOK-04 notes this as an M2 evaluation).
+- M6: if no better signal exists by then, open with the overlay/floating
+  layer, then ComboBox, then NavigationView — the order that one app
+  happened to need them.
+
+## 8. Evidence sources (fetched 2026-10-04)
 
 1. MS Learn, "XAML overview" (2026-07-27) — the supported markup-extension
    table (8 extensions; x:Static absent), x: namespace table, namescopes,

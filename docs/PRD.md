@@ -183,7 +183,10 @@ theme dictionaries.
   Strokes (Control/Strong/OnAccent/Focus outer+inner/Card/Divider/Surface/Flyout),
   Surfaces & layers (Layer, SolidBackground×5, Card×2, Subtle×4),
   Accent (Default/Secondary/Tertiary/Disabled/SelectedTextBackground,
-  `SystemAccentColor` + Light1-3/Dark1-3), Acrylic family.
+  `SystemAccentColor` + Light1-3/Dark1-3), Acrylic family. One anecdotal
+  precedent (MILESTONES §7) reads the accent live from the OS
+  (`UISettings.GetColorValue` on Windows); whether we do that instead of
+  shipping catalog values is an M1 evaluation, not a requirement.
   Constant-width numeric ramp values imported from the WinUI theme resource
   dump; Light/Dark/HighContrast values per catalog; HighContrast maps to
   the `SystemColor*` pairing table (never `Opacity` on HC brushes).
@@ -200,7 +203,9 @@ theme dictionaries.
   (enumerated), `PathIcon` (svg/path), `BitmapIcon`, `ImageIcon` (the
   elements ship with the control waves per §10). Windows ships **Segoe
   Fluent Icons** if present; fallback icon font (Lucide subset, as
-  gpui-kit does) for cross-platform parity. [D] The
+  gpui-kit does) for cross-platform parity. [D] Segoe MDL2 as a pre-Win11
+  fallback is a candidate from one anecdotal precedent (MILESTONES §7),
+  evaluated at M2. The
   `SymbolThemeFontFamily` indirection ships with the M1 token
   dictionaries. `AnimatedIcon` in §9.2 (REQ-MOT-08).
 - REQ-TOK-05 (Must, M1): theme switch at runtime (`RequestedTheme` on any
@@ -631,4 +636,4 @@ to an explicit-out entry with a reason — lives in
     (2026-09-19) re-verified 2026-10-04 against WASDK 1.0–2.0 release notes
     for version attributions; x:Uid / x:Load / VSM / ScrollViewer / Frame /
     PrintDocument / ElementSoundPlayer / SwapChainPanel API pages. [V] —
-    full URL list in MILESTONES.md §7.
+    full URL list in MILESTONES.md §8.

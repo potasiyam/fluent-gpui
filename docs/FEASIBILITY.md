@@ -84,6 +84,13 @@ on auto-close runs, `cargo test` 2/2.
   on non-Text/Content attributes, unparseable color/edge/number values, and
   binding-path misses/malformations. The parser still must carry roxmltree
   spans for real file/line diagnostics at M1.
+- Docs incident (2026-10-06): one app's hand-rolled Fluent layer was
+  weighted as [V] "field evidence" and promoted into PRD requirements; the
+  owner corrected — it is one anecdotal data point, not a validated example.
+  Root cause: verification tags applied to provenance rather than to claims.
+  Fixed same turn: MILESTONES §7 is non-normative, the PRD items became
+  M1/M2 evaluations. Anecdotes are inputs to evaluate, never requirement
+  sources.
 
 ## Scope of the PoC
 
