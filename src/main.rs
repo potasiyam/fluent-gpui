@@ -75,7 +75,7 @@ fn demo_handlers() -> HashMap<String, HandlerFn<DemoApp>> {
 /// The PoC's interim surface for the window backdrop, read off the page
 /// root; the real XAML `Window` element is REQ-WIN-01 (M2).
 fn backdrop_from_xaml(tree: &XamlElement) -> WindowBackgroundAppearance {
-    match tree.attributes.get("SystemBackdrop").map(|v| v.trim()) {
+    match tree.attr("SystemBackdrop").map(|v| v.trim()) {
         None => WindowBackgroundAppearance::Opaque,
         Some("Mica") => WindowBackgroundAppearance::MicaBackdrop,
         Some("MicaAlt") => WindowBackgroundAppearance::MicaAltBackdrop,
@@ -151,7 +151,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "Button")
             .expect("demo has a Button");
-        let name = button.attributes.get("Click").unwrap();
+        let name = button.attr("Click").unwrap();
         assert_eq!(name, "OnIncrement");
         assert!(
             demo_handlers().contains_key(name),

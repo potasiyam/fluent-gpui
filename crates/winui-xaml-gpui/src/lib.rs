@@ -55,19 +55,27 @@ pub fn render_element<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str)
     }
 }
 
-/// Warns on known-unsupported attributes and on markup extensions outside
-/// `Text`/`Content` (the only attributes whose extensions get resolved).
+/// Warns on known-unsupported attributes, on property elements (not in the
+/// PoC subset), and on markup extensions outside `Text`/`Content` (the only
+/// attributes whose extensions get resolved).
 fn warn_unsupported(el: &XamlElement) {
+    for prop in &el.properties {
+        eprintln!(
+            "[xaml] property element <{}> is not supported in the PoC subset; ignored",
+            prop.name
+        );
+    }
     for attr in UNSUPPORTED_ATTRS {
-        if el.attributes.contains_key(*attr) {
+        if el.attr(attr).is_some() {
             eprintln!("[xaml] attribute \"{attr}\" is not implemented in the PoC subset; ignored");
         }
     }
-    for (key, value) in &el.attributes {
-        let t = value.trim();
-        if key != "Text" && key != "Content" && t.starts_with('{') && t.ends_with('}') {
+    for a in &el.attributes {
+        let t = a.value.trim();
+        if a.name != "Text" && a.name != "Content" && t.starts_with('{') && t.ends_with('}') {
             eprintln!(
-                "[xaml] markup extension on \"{key}\" is only resolved on Text/Content in the PoC subset; ignored"
+                "[xaml] markup extension on \"{}\" is only resolved on Text/Content in the PoC subset; ignored",
+                a.name
             );
         }
     }
@@ -75,7 +83,7 @@ fn warn_unsupported(el: &XamlElement) {
 
 /// WinUI `Visibility`: `Collapsed` removes the element from layout entirely.
 fn is_collapsed(el: &XamlElement) -> bool {
-    match el.attributes.get("Visibility").map(|v| v.trim()) {
+    match el.attr("Visibility").map(|v| v.trim()) {
         None => false,
         Some(v) if v.eq_ignore_ascii_case("Visible") => false,
         Some(v) if v.eq_ignore_ascii_case("Collapsed") => true,
@@ -93,8 +101,7 @@ fn container<V>(
     is_page: bool,
 ) -> AnyElement {
     let vertical = el
-        .attributes
-        .get("Orientation")
+        .attr("Orientation")
         .map(|o| !o.trim().eq_ignore_ascii_case("Horizontal"))
         .unwrap_or(true);
 
@@ -144,8 +151,7 @@ fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>) -> AnyElement {
         d = d.text_color(c);
     }
     if el
-        .attributes
-        .get("FontWeight")
+        .attr("FontWeight")
         .is_some_and(|w| w.trim().eq_ignore_ascii_case("bold"))
     {
         d = d.font_weight(gpui::FontWeight::BOLD);
@@ -204,7 +210,7 @@ fn button<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyEleme
         .hover(|s| s.bg(rgb(0x1A86DE)))
         .active(|s| s.bg(rgb(0x006AC1)));
 
-    if let Some(name) = el.attributes.get("Click").map(|s| s.trim().to_string()) {
+    if let Some(name) = el.attr("Click").map(|s| s.trim().to_string()) {
         if let Some(handler) = ctx.handlers.get(&name).cloned() {
             let view = ctx.view.clone();
             b = b.on_click(
@@ -246,7 +252,7 @@ fn apply_common<E: Styled>(e: E, el: &XamlElement) -> E {
 /// HorizontalAlignment is approximated by wrapping in a full-width flex line,
 /// which works inside any column/row flex parent.
 fn align_wrap(el: &XamlElement, inner: AnyElement) -> AnyElement {
-    match el.attributes.get("HorizontalAlignment").map(|s| s.trim()) {
+    match el.attr("HorizontalAlignment").map(|s| s.trim()) {
         Some("Center") => div().flex().w_full().justify_center().child(inner),
         Some("Right") => div().flex().w_full().justify_end().child(inner),
         _ => return inner,
@@ -261,13 +267,13 @@ fn resolve_markup<V>(
     attr: &str,
     ctx: &XamlContext<'_, V>,
 ) -> Option<SharedString> {
-    let raw = el.attributes.get(attr)?;
+    let raw = el.attr(attr)?;
     let t = raw.trim();
     if let Some(body) = t.strip_prefix("{x:Bind").and_then(|r| r.strip_suffix('}')) {
         if !body.is_empty() && !body.starts_with(char::is_whitespace) {
             // `{x:BindFoo}` is a parse error in real XAML, not a binding.
             eprintln!("[xaml] malformed binding \"{t}\"; rendering as literal text");
-            return Some(raw.clone().into());
+            return Some(SharedString::from(raw));
         }
         let path = body.trim().split(',').next().unwrap_or("").trim();
         if body.trim().contains(',') {
@@ -287,11 +293,11 @@ fn resolve_markup<V>(
             }
         };
     }
-    Some(raw.clone().into())
+    Some(SharedString::from(raw))
 }
 
 fn attr_f32(el: &XamlElement, attr: &str) -> Option<f32> {
-    let v = el.attributes.get(attr)?.trim();
+    let v = el.attr(attr)?.trim();
     match v.parse() {
         Ok(n) => Some(n),
         Err(_) => {
@@ -304,7 +310,7 @@ fn attr_f32(el: &XamlElement, attr: &str) -> Option<f32> {
 /// WinUI edge format: "12", "leftRight,topBottom" (2 values), or
 /// "left,top,right,bottom" (4 values).
 fn attr_edges(el: &XamlElement, attr: &str) -> Option<(f32, f32, f32, f32)> {
-    let v = el.attributes.get(attr)?.trim().to_string();
+    let v = el.attr(attr)?.trim().to_string();
     let parts: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
     let parsed = match parts.len() {
         1 => Some((parts[0], parts[0], parts[0], parts[0])),
@@ -321,7 +327,7 @@ fn attr_edges(el: &XamlElement, attr: &str) -> Option<(f32, f32, f32, f32)> {
 }
 
 fn attr_color(el: &XamlElement, attr: &str) -> Option<gpui::Rgba> {
-    let v = el.attributes.get(attr)?.trim();
+    let v = el.attr(attr)?.trim();
     let parsed = if let Some(hex) = v.strip_prefix('#') {
         match hex.len() {
             6 => u32::from_str_radix(hex, 16).ok().map(rgb),

@@ -97,8 +97,9 @@ on auto-close runs, `cargo test` 2/2.
   they cover: unknown elements, dropped element children, unsupported
   attributes (Min/Max size, VerticalAlignment, IsEnabled), markup extensions
   on non-Text/Content attributes, unparseable color/edge/number values, and
-  binding-path misses/malformations. The parser still must carry roxmltree
-  spans for real file/line diagnostics at M1.
+  binding-path misses/malformations. The parser now carries 1:1 source
+  positions end-to-end (2026-10-06); the WX-code emitter with catalog-backed
+  unknown-element diagnostics is the remaining M1 work (REQ-DIAG-01/02).
 - Screenshot evidence has two environment failure modes (2026-10-06): an
   actively used desktop wins the focus race (app renders behind other
   windows), and a locked session makes GDI `CopyFromScreen` fail with "The
