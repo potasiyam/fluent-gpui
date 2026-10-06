@@ -142,7 +142,8 @@ tracked as an open question for the exclusion-blend acrylic layer (§7.3).
 ### 5.3 Resources and styles
 - REQ-RES-01 (Must, M1): `ResourceDictionary`, `x:Key`, merged dictionaries,
   `ThemeDictionaries` with **Light, Dark, HighContrast** keys (a "Default"
-  key is a diagnostic warning, per the vendored theming rules).
+  key is a diagnostic warning, per the vendored theming rules); dictionaries
+  load from separate files via `Source` [V — MS Learn xaml-resource-dictionary].
 - REQ-RES-02 (Must, M1): `Style`/`Setter` blocks, `BasedOn` inheritance;
   library default styles ship as embedded XAML compiled into the crate.
 - REQ-RES-03 (Should, M2): `DataTemplate` + `x:DataType` (typed item
@@ -168,6 +169,11 @@ tracked as an open question for the exclusion-blend acrylic layer (§7.3).
 - REQ-I18N-01 (Should, M7): `x:Uid` + resource lookup for strings; RTL
   `FlowDirection` supported on all layout containers (taffy direction
   properties), verified with mirrored gallery pages.
+
+### 5.7 Property system
+- REQ-PROP-01 (Must, M1): property value inheritance down the visual tree for
+  `FontFamily`, `FontSize`, `FontWeight`, `Foreground`, `FlowDirection` —
+  WinUI semantics [D — promoted from MILESTONES §3 at M1 start].
 
 ## 6. Design tokens (Fluent 2) — the full inventory
 

@@ -57,6 +57,21 @@ cargo test                     # headless: parse tree shape + click->state->bind
 > → `DWMWA_SYSTEMBACKDROP_TYPE`, Windows 11 22H2+), so the window-backdrop
 > story needs no custom DWM code from us.
 
+> **Update (2026-10-06, gpui-pre port — M1 step 0):** the PoC now builds and
+> runs on the `gpui-pre` snapshot family (requirement `"0.3"`; resolved to
+> 0.3.8, snapshot zed@279fe07) with `gpui-pre-platform` selecting the Windows
+> backend (DirectX/DirectWrite, no features needed). All feasibility checks
+> re-ran green: `cargo test` 2/2, `POC_AUTOCLOSE_SECS=4 cargo run` exit 0.
+> API drift vs gpui 0.2.2 cost exactly one change in the PoC: the entry point
+> is `gpui_platform::application().run(…)` instead of
+> `gpui::Application::new().run(…)`; everything else compiled unchanged.
+> `SystemBackdrop="Mica"` on the page root maps to
+> `WindowBackgroundAppearance::MicaBackdrop` (a `WindowOptions` field,
+> gpui-pre 0.3.8 `src/platform.rs`), exercised by demo.xaml. Visual
+> confirmation of the rendered Mica window is pending: the workstation
+> session locked mid-check and GDI capture fails on a locked session (see
+> friction list).
+
 Evidence: `poc-screenshot.png` (rendered window, captured mid-run), exit code 0
 on auto-close runs, `cargo test` 2/2.
 
@@ -84,6 +99,13 @@ on auto-close runs, `cargo test` 2/2.
   on non-Text/Content attributes, unparseable color/edge/number values, and
   binding-path misses/malformations. The parser still must carry roxmltree
   spans for real file/line diagnostics at M1.
+- Screenshot evidence has two environment failure modes (2026-10-06): an
+  actively used desktop wins the focus race (app renders behind other
+  windows), and a locked session makes GDI `CopyFromScreen` fail with "The
+  handle is invalid" entirely (observed: capture worked 22:51, failed 22:55
+  with the unchanged script; LogonUI running). `scripts/screenshot-focused.ps1`
+  handles the first half by forcing the app window to the foreground; the
+  second half simply must wait for unlock.
 - Docs incident (2026-10-06): one app's hand-rolled Fluent layer was
   weighted as [V] "field evidence" and promoted into PRD requirements; the
   owner corrected — it is one anecdotal data point, not a validated example.

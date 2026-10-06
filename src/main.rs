@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, Render, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px,
-    size,
+    App, Bounds, Context, Render, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, prelude::*, px, size,
 };
 use render::{AppState, HandlerFn, XamlContext};
 
@@ -21,6 +21,7 @@ struct DemoApp {
     tree: xaml::XamlElement,
     state: AppState,
     handlers: HashMap<String, HandlerFn>,
+    backdrop: WindowBackgroundAppearance,
 }
 
 /// The text `{x:Bind ClicksText}` resolves to; shared by renderer and tests.
@@ -47,10 +48,13 @@ impl Render for DemoApp {
             view: cx.entity().downgrade(),
         };
 
-        gpui::div()
-            .size_full()
-            .bg(gpui::rgb(0x1F1F1F))
-            .child(render::render_element(&self.tree, &ctx, "0"))
+        // Opaque windows need an explicit base color; a Mica/Acrylic backdrop
+        // shows through only when the root stays transparent.
+        let mut root = gpui::div().size_full();
+        if self.backdrop == WindowBackgroundAppearance::Opaque {
+            root = root.bg(gpui::rgb(0x1F1F1F));
+        }
+        root.child(render::render_element(&self.tree, &ctx, "0"))
     }
 }
 
@@ -63,6 +67,21 @@ fn demo_handlers() -> HashMap<String, HandlerFn> {
     )])
 }
 
+/// The PoC's interim surface for the window backdrop, read off the page
+/// root; the real XAML `Window` element is REQ-WIN-01 (M2).
+fn backdrop_from_xaml(tree: &xaml::XamlElement) -> WindowBackgroundAppearance {
+    match tree.attributes.get("SystemBackdrop").map(|v| v.trim()) {
+        None => WindowBackgroundAppearance::Opaque,
+        Some("Mica") => WindowBackgroundAppearance::MicaBackdrop,
+        Some("MicaAlt") => WindowBackgroundAppearance::MicaAltBackdrop,
+        Some("Acrylic") => WindowBackgroundAppearance::Blurred,
+        Some(other) => {
+            eprintln!("[xaml] SystemBackdrop=\"{other}\" not in the PoC subset; using Opaque");
+            WindowBackgroundAppearance::Opaque
+        }
+    }
+}
+
 fn main() {
     let xaml_path = demo_xaml_path();
     let xaml_src = match std::fs::read_to_string(&xaml_path) {
@@ -73,13 +92,15 @@ fn main() {
         }
     };
     let tree = xaml::parse(&xaml_src).expect("XAML failed to parse");
+    let backdrop = backdrop_from_xaml(&tree);
     let handlers = demo_handlers();
 
-    gpui::Application::new().run(move |cx: &mut App| {
+    gpui_platform::application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(720.), px(480.)), cx);
         let _window = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_background: backdrop,
                 titlebar: Some(TitlebarOptions {
                     title: Some("WinUI XAML on GPUI — feasibility PoC".into()),
                     ..Default::default()
@@ -91,6 +112,7 @@ fn main() {
                     tree,
                     state: AppState::default(),
                     handlers: handlers.clone(),
+                    backdrop,
                 })
             },
         );
@@ -103,7 +125,7 @@ fn main() {
                 cx.background_executor()
                     .timer(Duration::from_secs(secs))
                     .await;
-                let _ = cx.update(|cx| cx.quit());
+                cx.update(|cx| cx.quit());
             })
             .detach();
         }

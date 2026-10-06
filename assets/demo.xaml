@@ -1,11 +1,11 @@
 <Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      Background="#FF1F1F1F">
+      SystemBackdrop="Mica">
 
   <StackPanel Spacing="14" Padding="36,28,36,28" HorizontalAlignment="Center">
     <TextBlock Text="WinUI XAML on GPUI" FontSize="34" FontWeight="Bold"
                Foreground="#FFF3F3F3" HorizontalAlignment="Center" />
-    <TextBlock Text="roxmltree parser -> gpui 0.2 renderer (Blade/DX12, Windows)"
+    <TextBlock Text="roxmltree parser -> gpui-pre 0.3 renderer (DirectX, Mica backdrop)"
                FontSize="14" Foreground="#FF9C9C9C" HorizontalAlignment="Center" />
 
     <Border Background="#FF2D2D30" CornerRadius="8" Padding="18"

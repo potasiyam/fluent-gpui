@@ -6,7 +6,12 @@ license = "MIT"
 publish = false
 
 [dependencies]
-gpui = "0.2"
+# gpui-pre is the live gpui snapshot line (PLAN §1); the official 0.2 crate is
+# a stale one-off and must not be "upgraded" back to. gpui-pre-platform picks
+# the OS backend (DirectX/DirectWrite on Windows, no features needed). Caret
+# "0.3" auto-accepts new snapshots on the line; Cargo.lock holds the exact one.
+gpui = { package = "gpui-pre", version = "0.3" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3" }
 roxmltree = "0.20"
 
 # Optimize dependencies even in dev builds; gpui is unusably slow fully
