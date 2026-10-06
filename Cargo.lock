@@ -6498,11 +6498,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "winui-xaml-gpui"
+version = "0.1.0"
+dependencies = [
+ "gpui-pre",
+ "winui-xaml-syntax",
+]
+
+[[package]]
 name = "winui-xaml-poc"
 version = "0.1.0"
 dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
+ "winui-xaml-gpui",
+ "winui-xaml-syntax",
+]
+
+[[package]]
+name = "winui-xaml-syntax"
+version = "0.1.0"
+dependencies = [
  "roxmltree 0.20.0",
 ]
 

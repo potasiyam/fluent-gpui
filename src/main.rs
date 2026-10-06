@@ -1,10 +1,8 @@
-//! Feasibility PoC: load a WinUI-style .xaml file and render it with GPUI.
+//! Feasibility PoC host: load a WinUI-style .xaml file and render it with
+//! GPUI through the winui-xaml crates.
 //!
 //! Run: `cargo run` (or `POC_AUTOCLOSE_SECS=4 cargo run` for a self-closing
 //! run used by the automated feasibility check).
-
-mod render;
-mod xaml;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,12 +13,19 @@ use gpui::{
     App, Bounds, Context, Render, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowOptions, prelude::*, px, size,
 };
-use render::{AppState, HandlerFn, XamlContext};
+use winui_xaml_gpui::{HandlerFn, XamlContext, render_element};
+use winui_xaml_syntax::{XamlElement, parse};
+
+/// Host state the XAML can reach through `{x:Bind PropertyName}`.
+#[derive(Default)]
+struct AppState {
+    clicks: u32,
+}
 
 struct DemoApp {
-    tree: xaml::XamlElement,
+    tree: XamlElement,
     state: AppState,
-    handlers: HashMap<String, HandlerFn>,
+    handlers: HashMap<String, HandlerFn<DemoApp>>,
     backdrop: WindowBackgroundAppearance,
 }
 
@@ -54,22 +59,22 @@ impl Render for DemoApp {
         if self.backdrop == WindowBackgroundAppearance::Opaque {
             root = root.bg(gpui::rgb(0x1F1F1F));
         }
-        root.child(render::render_element(&self.tree, &ctx, "0"))
+        root.child(render_element(&self.tree, &ctx, "0"))
     }
 }
 
-fn demo_handlers() -> HashMap<String, HandlerFn> {
+fn demo_handlers() -> HashMap<String, HandlerFn<DemoApp>> {
     HashMap::from([(
         "OnIncrement".to_string(),
-        Arc::new(|state: &mut AppState| {
-            state.clicks += 1;
-        }) as HandlerFn,
+        Arc::new(|app: &mut DemoApp| {
+            app.state.clicks += 1;
+        }) as HandlerFn<DemoApp>,
     )])
 }
 
 /// The PoC's interim surface for the window backdrop, read off the page
 /// root; the real XAML `Window` element is REQ-WIN-01 (M2).
-fn backdrop_from_xaml(tree: &xaml::XamlElement) -> WindowBackgroundAppearance {
+fn backdrop_from_xaml(tree: &XamlElement) -> WindowBackgroundAppearance {
     match tree.attributes.get("SystemBackdrop").map(|v| v.trim()) {
         None => WindowBackgroundAppearance::Opaque,
         Some("Mica") => WindowBackgroundAppearance::MicaBackdrop,
@@ -91,7 +96,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let tree = xaml::parse(&xaml_src).expect("XAML failed to parse");
+    let tree = parse(&xaml_src).expect("XAML failed to parse");
     let backdrop = backdrop_from_xaml(&tree);
     let handlers = demo_handlers();
 
@@ -137,26 +142,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn demo_xaml_parses_into_expected_tree() {
-        let src = std::fs::read_to_string(demo_xaml_path()).unwrap();
-        let tree = xaml::parse(&src).unwrap();
-        assert_eq!(tree.name, "Page");
-        let panel = &tree.children[0];
-        assert_eq!(panel.name, "StackPanel");
-        let kinds: Vec<&str> = panel.children.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(kinds, ["TextBlock", "TextBlock", "Border", "Button"]);
-        let button = &panel.children[3];
-        assert_eq!(
-            button.attributes.get("Click").map(String::as_str),
-            Some("OnIncrement")
-        );
-    }
-
-    #[test]
     fn click_attr_resolves_and_drives_state() {
         let src = std::fs::read_to_string(demo_xaml_path()).unwrap();
-        let tree = xaml::parse(&src).unwrap();
-        let handlers = demo_handlers();
+        let tree = parse(&src).unwrap();
 
         let button = tree.children[0]
             .children
@@ -164,15 +152,28 @@ mod tests {
             .find(|c| c.name == "Button")
             .expect("demo has a Button");
         let name = button.attributes.get("Click").unwrap();
-        let handler = handlers.get(name).expect("handler registered in map");
+        assert_eq!(name, "OnIncrement");
+        assert!(
+            demo_handlers().contains_key(name),
+            "handler registered in map"
+        );
 
-        let mut state = AppState::default();
-        handler(&mut state);
-        handler(&mut state);
-        assert_eq!(state.clicks, 2);
+        // The handler seam is generic over the host view; driving a real
+        // DemoApp exercises it without a window.
+        let mut app = DemoApp {
+            tree,
+            state: AppState::default(),
+            handlers: demo_handlers(),
+            backdrop: WindowBackgroundAppearance::Opaque,
+        };
+        // Arc clone: the call takes &mut app while the handler stays alive.
+        let handler = app.handlers.get("OnIncrement").unwrap().clone();
+        handler(&mut app);
+        handler(&mut app);
+        assert_eq!(app.state.clicks, 2);
 
         assert_eq!(
-            clicks_binding_text(state.clicks),
+            clicks_binding_text(app.state.clicks),
             "Button clicked 2 time(s)"
         );
     }

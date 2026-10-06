@@ -43,8 +43,10 @@ MILESTONES.md; do not build past the current milestone.
 Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
 (naming C-CASE/C-GETTER, errors C-GOOD-ERR, docs C-DOC). Project specifics:
 
-- Edition 2024. `cargo fmt`, `cargo clippy --all-targets`, and `cargo test`
-  all clean before every commit. No lint allowlists without a written reason.
+- Edition 2024. `cargo fmt`, `cargo clippy --all-targets --workspace`, and
+  `cargo test --workspace` all clean before every commit — the root package
+  is the default member, so plain `cargo test`/`clippy` skip the library
+  crates. No lint allowlists without a written reason.
 - Errors: `Result` with descriptive messages; no `unwrap`/`expect` in library
   code — `expect` only in `main`, tests, and startup. XAML failures become
   diagnostics (WX codes from M1), never panics and never silent fallbacks.

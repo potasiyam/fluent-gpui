@@ -46,13 +46,15 @@ live window, and `Click=` handlers mutate Rust state through bindings.
 ```bash
 cargo run                       # window stays open; click the button
 POC_AUTOCLOSE_SECS=4 cargo run  # renders 4 s, quits, exit 0 = pass
-cargo test                      # headless checks
+cargo test --workspace          # headless checks (all crates)
 ```
 
 ## Layout
 
 ```
-src/                 XAML parser, GPUI renderer, host app
+crates/              Library crates: winui-xaml-syntax (parser),
+                     winui-xaml-gpui (renderer backend)
+src/                 Demo host app
 assets/demo.xaml     PoC page
 docs/                Project documentation
 references/          Vendored win-dev-skills (MIT, pinned @2e8c902)

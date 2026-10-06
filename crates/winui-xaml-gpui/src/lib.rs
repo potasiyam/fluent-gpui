@@ -1,4 +1,6 @@
-//! XAML object model -> GPUI element mapping.
+//! GPUI backend for the winui-xaml dialect: maps the parsed XAML tree onto
+//! gpui elements. The only crate in the workspace allowed to touch gpui
+//! types (PLAN §3).
 //!
 //! PoC subset: Page/UserControl, StackPanel, TextBlock, Border, Button,
 //! rendered bottom-up into owned `AnyElement`s. Unsupported constructs warn
@@ -13,23 +15,18 @@ use gpui::{
     Styled, WeakEntity, div, prelude::*, px, relative, rgb, rgba,
 };
 
-use crate::xaml::XamlElement;
+use winui_xaml_syntax::XamlElement;
 
 /// Host handler keyed by the `Click="Name"` attribute value; it only touches
-/// app state.
-pub type HandlerFn = Arc<dyn Fn(&mut AppState)>;
+/// host state. The library owns the `cx.notify()` plumbing (REQ-EVT-01).
+pub type HandlerFn<V> = Arc<dyn Fn(&mut V)>;
 
-/// Host state the XAML can reach through `{x:Bind PropertyName}`.
-#[derive(Default)]
-pub struct AppState {
-    pub clicks: u32,
-}
-
-pub struct XamlContext<'a> {
-    pub handlers: &'a HashMap<String, HandlerFn>,
+/// Per-render context the host provides; `V` is the host's root view.
+pub struct XamlContext<'a, V: 'static> {
+    pub handlers: &'a HashMap<String, HandlerFn<V>>,
     pub bindings: &'a HashMap<String, String>,
-    /// Lets `Click=` handlers mutate the owning view and request a re-render.
-    pub view: WeakEntity<crate::DemoApp>,
+    /// Lets `Click=` handlers mutate the owning view and re-render it.
+    pub view: WeakEntity<V>,
 }
 
 /// Attributes the PoC knows about but does not implement; warned, never
@@ -43,7 +40,7 @@ const UNSUPPORTED_ATTRS: &[&str] = &[
     "IsEnabled",
 ];
 
-pub fn render_element(el: &XamlElement, ctx: &XamlContext, path: &str) -> AnyElement {
+pub fn render_element<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
     warn_unsupported(el);
     match el.name.as_str() {
         "Page" | "UserControl" => container(el, ctx, path, true),
@@ -89,7 +86,12 @@ fn is_collapsed(el: &XamlElement) -> bool {
     }
 }
 
-fn container(el: &XamlElement, ctx: &XamlContext, path: &str, is_page: bool) -> AnyElement {
+fn container<V>(
+    el: &XamlElement,
+    ctx: &XamlContext<'_, V>,
+    path: &str,
+    is_page: bool,
+) -> AnyElement {
     let vertical = el
         .attributes
         .get("Orientation")
@@ -123,7 +125,7 @@ fn container(el: &XamlElement, ctx: &XamlContext, path: &str, is_page: bool) -> 
     apply_common(d, el).into_any_element()
 }
 
-fn text_block(el: &XamlElement, ctx: &XamlContext) -> AnyElement {
+fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>) -> AnyElement {
     if !el.children.is_empty() {
         eprintln!(
             "[xaml] <TextBlock> element children are not supported in the PoC subset; dropped"
@@ -151,7 +153,7 @@ fn text_block(el: &XamlElement, ctx: &XamlContext) -> AnyElement {
     apply_common(d, el).into_any_element()
 }
 
-fn border(el: &XamlElement, ctx: &XamlContext, path: &str) -> AnyElement {
+fn border<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
     let mut d = div().flex().flex_col();
     if let Some(bg) = attr_color(el, "Background") {
         d = d.bg(bg);
@@ -180,7 +182,7 @@ fn border(el: &XamlElement, ctx: &XamlContext, path: &str) -> AnyElement {
     apply_common(d, el).into_any_element()
 }
 
-fn button(el: &XamlElement, ctx: &XamlContext, path: &str) -> AnyElement {
+fn button<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
     if !el.children.is_empty() {
         eprintln!("[xaml] <Button> element children are not supported in the PoC subset; dropped");
     }
@@ -207,8 +209,8 @@ fn button(el: &XamlElement, ctx: &XamlContext, path: &str) -> AnyElement {
             let view = ctx.view.clone();
             b = b.on_click(
                 move |_ev: &ClickEvent, _window: &mut gpui::Window, cx: &mut App| {
-                    let _ = view.update(cx, |app, cx| {
-                        (handler)(&mut app.state);
+                    let _ = view.update(cx, |host, cx| {
+                        (handler)(host);
                         cx.notify();
                     });
                 },
@@ -254,7 +256,11 @@ fn align_wrap(el: &XamlElement, inner: AnyElement) -> AnyElement {
 
 /// `{x:Bind Path[, …]}`: the first comma-separated token is the path, other
 /// parameters warn and are ignored. Other `{…}` values pass through verbatim.
-fn resolve_markup(el: &XamlElement, attr: &str, ctx: &XamlContext) -> Option<SharedString> {
+fn resolve_markup<V>(
+    el: &XamlElement,
+    attr: &str,
+    ctx: &XamlContext<'_, V>,
+) -> Option<SharedString> {
     let raw = el.attributes.get(attr)?;
     let t = raw.trim();
     if let Some(body) = t.strip_prefix("{x:Bind").and_then(|r| r.strip_suffix('}')) {

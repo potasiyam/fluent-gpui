@@ -1,8 +1,8 @@
-//! Minimal XAML syntax layer: parse a XAML document into a plain element tree.
+//! XAML syntax layer: parse a XAML document into a plain element tree.
 //!
-//! Namespaces are accepted but not validated; `x:`-prefixed attributes from
-//! the XAML language namespace are normalized to their `x:` spelling so the
-//! renderer can key on them.
+//! Backend-independent and gpui-free (PLAN §3). Namespaces are accepted but
+//! not validated; `x:`-prefixed attributes from the XAML language namespace
+//! are normalized to their `x:` spelling so the renderer can key on them.
 
 use std::collections::HashMap;
 
@@ -64,4 +64,47 @@ fn convert(node: roxmltree::Node) -> Result<XamlElement, String> {
         attributes,
         children,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <StackPanel Spacing="14">
+    <TextBlock Text="Hi" x:Name="title"/>
+    <Button Click="OnIncrement">Increment</Button>
+  </StackPanel>
+</Page>"#;
+
+    #[test]
+    fn parses_tree_shape_and_x_namespace() {
+        let tree = parse(SAMPLE).unwrap();
+        assert_eq!(tree.name, "Page");
+        let panel = &tree.children[0];
+        assert_eq!(panel.name, "StackPanel");
+        let kinds: Vec<&str> = panel.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(kinds, ["TextBlock", "Button"]);
+
+        let title = &panel.children[0];
+        assert_eq!(
+            title.attributes.get("x:Name").map(String::as_str),
+            Some("title")
+        );
+        let button = &panel.children[1];
+        assert_eq!(
+            button.attributes.get("Click").map(String::as_str),
+            Some("OnIncrement")
+        );
+        assert_eq!(
+            button.attributes.get("Content").map(String::as_str),
+            Some("Increment")
+        );
+    }
+
+    #[test]
+    fn empty_document_is_an_error() {
+        assert!(parse("").is_err());
+    }
 }

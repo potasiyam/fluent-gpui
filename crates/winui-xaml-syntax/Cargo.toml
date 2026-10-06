@@ -1,0 +1,9 @@
+[package]
+name = "winui-xaml-syntax"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+roxmltree = "0.20"
