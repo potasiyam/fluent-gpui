@@ -105,6 +105,24 @@ on auto-close runs, `cargo test` 2/2.
 > `MergedDictionaries`, dictionary `Source` files, and `{ThemeResource}`
 > re-resolution on theme switch (rides with the token/theme engine).
 
+> **Update (2026-10-07, M1 styles):** `Style`/`Setter`/`BasedOn` land in
+> the model (REQ-RES-02): styles are resource values — keyed, or implicit
+> keyed by TargetType — `style_setters` flattens the BasedOn chain (base
+> first, derived last), and `resolve_styles` produces the resolved tree:
+> setter values become attributes wherever no local value exists (WinUI
+> precedence: local value beats style setter). The renderer is unchanged;
+> it renders the resolved tree. `check_style_chains` validates TargetType
+> presence/knownness, setter properties against the catalog (the first
+> type-level diagnostics — WX0003 on a misspelled Setter property),
+> BasedOn cycles, and TargetType mismatches (WX1004). demo.xaml styles its
+> text through two keyed styles (one BasedOn) plus an implicit TextBlock
+> style and renders pixel-identical to the literal-hex version. Evidence:
+> `cargo test --workspace` 23/23, `POC_AUTOCLOSE_SECS=18` exit 0 with an
+> empty stderr, `m1-styles.png`. Not yet: library default styles as
+> embedded XAML (rides with the M2 control catalog) and WinUI's implicit
+> where-used scoping nuance — our implicit styles follow the normal
+> nearest-scope order, a documented approximation.
+
 ## Friction found (goes into M1 backlog)
 
 - A `Click` handler that mutates state must call `cx.notify()` inside the
@@ -141,7 +159,9 @@ on auto-close runs, `cargo test` 2/2.
   the foreground. Use it as the default evidence capture; it cannot show
   the DWM backdrop tint (composited outside the app surface), and
   `screenshot-focused.ps1` stays for whole-desktop shots when that is
-  explicitly wanted.
+  explicitly wanted. Window-open latency also varies by seconds between
+  runs; poll for the process window in a retry loop instead of sleeping a
+  fixed interval before capturing (2026-10-07).
 - Docs incident (2026-10-06): one app's hand-rolled Fluent layer was
   weighted as [V] "field evidence" and promoted into PRD requirements; the
   owner corrected — it is one anecdotal data point, not a validated example.

@@ -18,6 +18,7 @@
 //! | WX1001 | unresolved `{StaticResource}`/`{ThemeResource}` key |
 //! | WX1002 | malformed resource entry (no key, unparsable color, unsupported type) |
 //! | WX1003 | unknown `ThemeDictionaries` key |
+//! | WX1004 | style error (TargetType mismatch or unknown, BasedOn cycle or not a Style) |
 //!
 //! Resources (REQ-RES-01): [`collect_resources`] gathers `.Resources`
 //! dictionaries (plain and theme) into a [`ResourceSet`]; [`ResourceSet::resolve`]
@@ -27,11 +28,16 @@
 //! WinUI's parse exception. `MergedDictionaries` and dictionary `Source`
 //! files are later M1 work; WinUI's `"Default"` theme key is rejected
 //! because the vendored authoring rules ban it.
+//!
+//! Styles (REQ-RES-02): `Style` entries (keyed, or implicit keyed by
+//! TargetType) parse into [`StyleDef`]; [`style_setters`] flattens the
+//! BasedOn chain, and [`resolve_styles`] produces the resolved tree
+//! (PLAN §3) with setter values applied wherever no local value exists.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
-use winui_xaml_syntax::{Pos, XamlElement};
+use winui_xaml_syntax::{Attribute, Pos, XamlElement};
 
 /// How serious a diagnostic is. Errors stop the build/run (fail loud);
 /// warnings are printed and rendering continues.
@@ -82,6 +88,7 @@ const COMMON_PROPERTIES: &[&str] = &[
     "HorizontalAlignment",
     "Margin",
     "Opacity",
+    "Style",
     "Visibility",
     "Width",
 ];
@@ -139,6 +146,9 @@ impl Catalog {
             // The parser maps a Color element's text to a synthesized
             // Content attribute, so that is the property to check.
             ("Color", &["Content"]),
+            // Style infrastructure (REQ-RES-02).
+            ("Style", &["BasedOn", "TargetType"]),
+            ("Setter", &["Property", "Value"]),
         ]);
         Catalog {
             elements,
@@ -225,7 +235,7 @@ fn resolve_element(el: &XamlElement, catalog: &Catalog, diags: &mut Vec<Diagnost
         if p.name == format!("{}.Resources", el.name)
             || matches!(
                 p.name.as_str(),
-                "ResourceDictionary.ThemeDictionaries" | "SolidColorBrush.Color"
+                "ResourceDictionary.ThemeDictionaries" | "SolidColorBrush.Color" | "Style.Setters"
             )
         {
             for child in &p.child_elements {
@@ -346,11 +356,35 @@ pub fn parse_color(value: &str) -> Option<Rgba> {
     }
 }
 
-/// The value a resource key maps to. Brushes and colors both collapse to a
-/// color for now; styles arrive with the M1 styles unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The value a resource key maps to: a color or a style (REQ-RES-01/02).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceValue {
     Color(Rgba),
+    Style(StyleDef),
+}
+
+/// One `Setter` inside a `Style`: the target property name and its raw
+/// value string. Markup extensions in the value resolve where the property
+/// is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setter {
+    pub property: String,
+    pub value: String,
+}
+
+/// A WinUI `Style` (REQ-RES-02): a TargetType plus Setter list, optionally
+/// `BasedOn` another keyed style. Explicit styles carry an `x:Key`;
+/// implicit styles are keyed by TargetType alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleDef {
+    /// Position of the Style element, for diagnostics.
+    pub pos: Pos,
+    /// TargetType local name. `None` only on `BasedOn` styles, which
+    /// inherit the base style's TargetType (WinUI requires it otherwise).
+    pub target_type: Option<String>,
+    pub setters: Vec<Setter>,
+    /// Raw `BasedOn` value; the key is extracted at resolution time.
+    pub based_on: Option<String>,
 }
 
 /// All resource scopes collected from one page. Element-level `.Resources`
@@ -368,6 +402,19 @@ struct Scope {
     entries: HashMap<String, ResourceValue>,
     /// Per-theme dictionaries from `<…ResourceDictionary.ThemeDictionaries>`.
     theme_entries: HashMap<Theme, HashMap<String, ResourceValue>>,
+    /// Implicit styles keyed by TargetType (REQ-RES-02).
+    implicit_styles: HashMap<String, StyleDef>,
+}
+
+/// Scopes owning `path`, nearest first.
+fn owning_scopes<'a>(set: &'a ResourceSet, path: &str) -> Vec<&'a Scope> {
+    let mut owners: Vec<&Scope> = set
+        .scopes
+        .iter()
+        .filter(|s| in_scope(path, &s.owner))
+        .collect();
+    owners.sort_by_key(|s| Reverse(s.owner.len()));
+    owners
 }
 
 impl ResourceSet {
@@ -376,18 +423,24 @@ impl ResourceSet {
     /// dictionary wins over plain entries. `{ThemeResource}` re-resolution
     /// on theme switch re-runs this lookup (REQ-RES-01).
     pub fn resolve(&self, key: &str, path: &str, theme: Theme) -> Option<&ResourceValue> {
-        let mut owners: Vec<&Scope> = self
-            .scopes
-            .iter()
-            .filter(|s| in_scope(path, &s.owner))
-            .collect();
-        owners.sort_by_key(|s| Reverse(s.owner.len()));
-        for s in owners {
+        for s in owning_scopes(self, path) {
             if let Some(v) = s.theme_entries.get(&theme).and_then(|m| m.get(key)) {
                 return Some(v);
             }
             if let Some(v) = s.entries.get(key) {
                 return Some(v);
+            }
+        }
+        None
+    }
+
+    /// The implicit style for `target_type` at render `path` — nearest
+    /// scope wins. Theme dictionaries are not consulted for implicit
+    /// styles in the PoC subset.
+    pub fn resolve_implicit_style(&self, target_type: &str, path: &str) -> Option<&StyleDef> {
+        for s in owning_scopes(self, path) {
+            if let Some(style) = s.implicit_styles.get(target_type) {
+                return Some(style);
             }
         }
         None
@@ -456,6 +509,7 @@ fn parse_dictionary(
         owner: owner.to_string(),
         entries: HashMap::new(),
         theme_entries: HashMap::new(),
+        implicit_styles: HashMap::new(),
     };
     parse_dictionary_entries(elements, &mut scope, diags);
     set.scopes.push(scope);
@@ -484,9 +538,19 @@ fn parse_dictionary_entries(
                     ));
                 }
             }
-            insert_entries(&e.children, &mut scope.entries, diags);
+            insert_entries(
+                &e.children,
+                &mut scope.entries,
+                Some(&mut scope.implicit_styles),
+                diags,
+            );
         } else {
-            insert_entries(std::slice::from_ref(e), &mut scope.entries, diags);
+            insert_entries(
+                std::slice::from_ref(e),
+                &mut scope.entries,
+                Some(&mut scope.implicit_styles),
+                diags,
+            );
         }
     }
 }
@@ -494,9 +558,23 @@ fn parse_dictionary_entries(
 fn insert_entries(
     elements: &[XamlElement],
     into: &mut HashMap<String, ResourceValue>,
+    mut implicit: Option<&mut HashMap<String, StyleDef>>,
     diags: &mut Vec<Diagnostic>,
 ) {
     for e in elements {
+        if e.attr("x:Key").is_none() && e.name == "Style" {
+            match implicit.as_mut() {
+                Some(map) => insert_implicit_style(e, map, diags),
+                None => diags.push(Diagnostic::warning(
+                    "WX1002",
+                    "implicit Style is not supported inside ThemeDictionaries; give it an x:Key"
+                        .to_string(),
+                    e.pos,
+                    e.name.len() as u32 + 1,
+                )),
+            }
+            continue;
+        }
         let Some(key) = e.attr("x:Key") else {
             diags.push(Diagnostic::warning(
                 "WX1002",
@@ -517,6 +595,34 @@ fn insert_entries(
                 e.name.len() as u32 + 1,
             )),
         }
+    }
+}
+
+/// An unkeyed `Style` is implicit: keyed by its TargetType (REQ-RES-02).
+fn insert_implicit_style(
+    e: &XamlElement,
+    into: &mut HashMap<String, StyleDef>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let Some(target) = e.attr("TargetType").map(str::trim) else {
+        diags.push(Diagnostic::warning(
+            "WX1002",
+            "implicit Style needs a TargetType; entry ignored".to_string(),
+            e.pos,
+            e.name.len() as u32 + 1,
+        ));
+        return;
+    };
+    match parse_style(e) {
+        Ok(style) => {
+            into.insert(target.to_string(), style);
+        }
+        Err(reason) => diags.push(Diagnostic::warning(
+            "WX1002",
+            format!("implicit `{target}` style ignored: {reason}"),
+            e.pos,
+            e.name.len() as u32 + 1,
+        )),
     }
 }
 
@@ -550,13 +656,14 @@ fn parse_theme_dictionaries(
             }
         };
         let entries = scope.theme_entries.entry(theme).or_default();
-        insert_entries(&dict.children, entries, diags);
+        insert_entries(&dict.children, entries, None, diags);
     }
 }
 
 /// Parses one keyed resource element. The value forms for now:
-/// `SolidColorBrush` (Color attribute or `.Color` property element) and a
-/// `Color` element, whose text the parser synthesizes into Content.
+/// `SolidColorBrush` (Color attribute or `.Color` property element), a
+/// `Color` element (whose text the parser synthesizes into Content), and
+/// a keyed `Style`.
 fn parse_entry(el: &XamlElement) -> Result<ResourceValue, String> {
     let raw = match el.name.as_str() {
         "SolidColorBrush" => el
@@ -571,6 +678,7 @@ fn parse_entry(el: &XamlElement) -> Result<ResourceValue, String> {
         "Color" => el
             .attr("Content")
             .ok_or_else(|| "Color element has no text value".to_string())?,
+        "Style" => return parse_style(el).map(ResourceValue::Style),
         other => {
             return Err(format!(
                 "resource type `<{other}>` is not implemented in the PoC subset"
@@ -580,6 +688,42 @@ fn parse_entry(el: &XamlElement) -> Result<ResourceValue, String> {
     parse_color(raw)
         .map(ResourceValue::Color)
         .ok_or_else(|| format!("`{raw}` is not a color the PoC subset parses"))
+}
+
+/// Parses a `Style` element: TargetType, BasedOn, and the Setter list.
+/// Setters is Style's content property, so setters arrive either as direct
+/// children or inside `<Style.Setters>`.
+fn parse_style(el: &XamlElement) -> Result<StyleDef, String> {
+    let mut setter_elements: Vec<&XamlElement> = el.children.iter().collect();
+    for p in &el.properties {
+        if p.name == "Style.Setters" {
+            setter_elements.extend(p.child_elements.iter());
+        } else {
+            return Err(format!(
+                "property element `<{}>` on Style is not implemented in the PoC subset",
+                p.name
+            ));
+        }
+    }
+    let mut setters = Vec::new();
+    for s in setter_elements {
+        if s.name != "Setter" {
+            return Err(format!("<{}> inside a Style is not a Setter", s.name));
+        }
+        let (Some(property), Some(value)) = (s.attr("Property"), s.attr("Value")) else {
+            return Err("Setter needs Property and Value attributes".to_string());
+        };
+        setters.push(Setter {
+            property: property.trim().to_string(),
+            value: value.to_string(),
+        });
+    }
+    Ok(StyleDef {
+        pos: el.pos,
+        target_type: el.attr("TargetType").map(|t| t.trim().to_string()),
+        setters,
+        based_on: el.attr("BasedOn").map(str::to_string),
+    })
 }
 
 /// Scans rendered attributes for `{StaticResource …}`/`{ThemeResource …}`
@@ -628,8 +772,284 @@ fn check_refs(
             }
         }
     }
+    // A `Style` attribute must name a style whose TargetType matches the
+    // element it decorates (WinUI throws otherwise).
+    if let Some(key) = el.attr("Style").and_then(|v| {
+        resource_key(v, "StaticResource").or_else(|| resource_key(v, "ThemeResource"))
+    }) {
+        match resources.resolve(key, path, theme) {
+            Some(ResourceValue::Style(style)) => {
+                if let Some(target) = &style.target_type
+                    && *target != el.name
+                {
+                    diags.push(Diagnostic::error(
+                        "WX1004",
+                        format!(
+                            "Style `{key}` targets `{target}` but is applied to `{}`",
+                            el.name
+                        ),
+                        el.pos,
+                        el.name.len() as u32 + 1,
+                    ));
+                }
+            }
+            Some(_) => diags.push(Diagnostic::error(
+                "WX1004",
+                format!("resource `{key}` used as Style is not a Style"),
+                el.pos,
+                el.name.len() as u32 + 1,
+            )),
+            // The extension loop above already reported the missing key.
+            None => {}
+        }
+    }
     for (i, child) in el.children.iter().enumerate() {
         check_refs(child, &format!("{path}.{i}"), resources, theme, diags);
+    }
+}
+
+/// The flattened setter list for the style in effect on `el` at `path`:
+/// its explicit `Style` attribute, else the implicit style for its type.
+/// Based-on setters come first and derived setters last, so later entries
+/// win. BasedOn chains are followed at most 16 levels; [`check_style_chains`]
+/// reports broken references and cycles at load time.
+pub fn style_setters<'s>(
+    set: &'s ResourceSet,
+    el: &XamlElement,
+    path: &str,
+    theme: Theme,
+) -> Vec<(&'s str, &'s str)> {
+    fn as_style(value: &ResourceValue) -> Option<&StyleDef> {
+        match value {
+            ResourceValue::Style(s) => Some(s),
+            _ => None,
+        }
+    }
+    let explicit = el
+        .attr("Style")
+        .and_then(|v| {
+            resource_key(v, "StaticResource").or_else(|| resource_key(v, "ThemeResource"))
+        })
+        .and_then(|key| set.resolve(key, path, theme))
+        .and_then(as_style);
+    let mut chain = Vec::new();
+    let mut current = explicit.or_else(|| set.resolve_implicit_style(el.name.as_str(), path));
+    for _ in 0..16 {
+        let Some(style) = current else { break };
+        chain.push(style);
+        current = style
+            .based_on
+            .as_deref()
+            .and_then(|b| {
+                resource_key(b, "StaticResource").or_else(|| resource_key(b, "ThemeResource"))
+            })
+            .and_then(|key| set.resolve(key, path, theme))
+            .and_then(as_style);
+    }
+    chain.reverse();
+    chain
+        .iter()
+        .flat_map(|s| {
+            s.setters
+                .iter()
+                .map(|st| (st.property.as_str(), st.value.as_str()))
+        })
+        .collect()
+}
+
+/// Applies the style in effect on every element into a resolved copy of
+/// the tree (PLAN §3's resolved visual tree): setter values become
+/// attributes wherever the element has no local value — WinUI precedence
+/// is local value over style setter. Bindings and event attributes pass
+/// through untouched; they stay per-render concerns.
+pub fn resolve_styles(root: &XamlElement, resources: &ResourceSet, theme: Theme) -> XamlElement {
+    apply_styles(root, "0", resources, theme)
+}
+
+fn apply_styles(
+    el: &XamlElement,
+    path: &str,
+    resources: &ResourceSet,
+    theme: Theme,
+) -> XamlElement {
+    let mut attributes = el.attributes.clone();
+    // The flattened list has derived setters last; they override base
+    // setters, so dedupe keeping the last occurrence. A local attribute
+    // still beats every setter.
+    let mut setters: HashMap<&str, &str> = HashMap::new();
+    for (property, value) in style_setters(resources, el, path, theme) {
+        setters.insert(property, value);
+    }
+    for (property, value) in setters {
+        if !attributes.iter().any(|a| a.name == property) {
+            attributes.push(Attribute {
+                name: property.to_string(),
+                value: value.to_string(),
+                pos: el.pos,
+            });
+        }
+    }
+    XamlElement {
+        name: el.name.clone(),
+        pos: el.pos,
+        attributes,
+        // Property-element children are resource entries and content
+        // bodies here, not rendered elements; they carry no styles.
+        properties: el.properties.clone(),
+        children: el
+            .children
+            .iter()
+            .enumerate()
+            .map(|(i, c)| apply_styles(c, &format!("{path}.{i}"), resources, theme))
+            .collect(),
+    }
+}
+
+/// Validates every collected style against the catalog (REQ-RES-02):
+/// TargetType present and known, setter properties known on the
+/// TargetType, and BasedOn chains resolvable, style-typed,
+/// TargetType-compatible, and cycle-free (all WX1004-class, plus WX0003
+/// for unknown setter properties and WX1001 for missing BasedOn keys).
+pub fn check_style_chains(resources: &ResourceSet, catalog: &Catalog) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    for scope in &resources.scopes {
+        for (key, value) in &scope.entries {
+            if let ResourceValue::Style(style) = value {
+                check_one_style(&format!("`{key}`"), style, scope, catalog, &mut diags);
+            }
+        }
+        for (target, style) in &scope.implicit_styles {
+            check_one_style(
+                &format!("(implicit `{target}`)"),
+                style,
+                scope,
+                catalog,
+                &mut diags,
+            );
+        }
+    }
+    diags
+}
+
+fn check_one_style(
+    label: &str,
+    style: &StyleDef,
+    scope: &Scope,
+    catalog: &Catalog,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let target = match &style.target_type {
+        Some(t) => Some(t.as_str()),
+        None => {
+            if style.based_on.is_none() {
+                diags.push(Diagnostic::error(
+                    "WX1004",
+                    format!("Style {label} needs a TargetType or BasedOn"),
+                    style.pos,
+                    5,
+                ));
+            }
+            None
+        }
+    };
+    if let Some(t) = target {
+        match catalog.elements.get(t) {
+            None => diags.push(Diagnostic::error(
+                "WX1004",
+                format!("Style {label} targets unknown element `{t}`"),
+                style.pos,
+                t.len() as u32 + 1,
+            )),
+            Some(props) => {
+                for setter in &style.setters {
+                    if props.contains(&setter.property.as_str())
+                        || COMMON_PROPERTIES.contains(&setter.property.as_str())
+                    {
+                        continue;
+                    }
+                    if UNIMPLEMENTED_PROPERTIES.contains(&setter.property.as_str()) {
+                        diags.push(Diagnostic::warning(
+                            "WX0007",
+                            format!(
+                                "Setter property `{}` on `{t}` is recognized but not implemented in the PoC subset",
+                                setter.property
+                            ),
+                            style.pos,
+                            setter.property.len() as u32,
+                        ));
+                    } else {
+                        diags.push(Diagnostic::error(
+                            "WX0003",
+                            format!("unknown property `{}` on Setter for `{t}`", setter.property),
+                            style.pos,
+                            setter.property.len() as u32 + 1,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut seen: Vec<&str> = Vec::new();
+    let mut current = style;
+    while let Some(based_on) = &current.based_on {
+        let Some(key) = resource_key(based_on, "StaticResource")
+            .or_else(|| resource_key(based_on, "ThemeResource"))
+        else {
+            diags.push(Diagnostic::error(
+                "WX1002",
+                format!(
+                    "Style {label} BasedOn must be `{{StaticResource …}}` or `{{ThemeResource …}}`"
+                ),
+                style.pos,
+                based_on.len() as u32,
+            ));
+            break;
+        };
+        if seen.contains(&key) {
+            diags.push(Diagnostic::error(
+                "WX1004",
+                format!("Style {label} BasedOn cycle involving `{key}`"),
+                style.pos,
+                key.len() as u32 + 1,
+            ));
+            break;
+        }
+        match scope.entries.get(key) {
+            Some(ResourceValue::Style(base)) => {
+                if let (Some(a), Some(b)) = (&current.target_type, &base.target_type)
+                    && a != b
+                {
+                    diags.push(Diagnostic::error(
+                        "WX1004",
+                        format!("Style {label} targets `{a}` but BasedOn `{key}` targets `{b}`"),
+                        style.pos,
+                        key.len() as u32 + 1,
+                    ));
+                    break;
+                }
+                seen.push(key);
+                current = base;
+            }
+            Some(_) => {
+                diags.push(Diagnostic::error(
+                    "WX1004",
+                    format!("Style {label} BasedOn `{key}` is not a Style"),
+                    style.pos,
+                    key.len() as u32 + 1,
+                ));
+                break;
+            }
+            None => {
+                diags.push(Diagnostic::error(
+                    "WX1001",
+                    format!("Style {label} BasedOn key `{key}` not found"),
+                    style.pos,
+                    key.len() as u32 + 1,
+                ));
+                break;
+            }
+        }
     }
 }
 
@@ -743,13 +1163,11 @@ mod tests {
   </Page.Resources>
 </Page>"#;
         let diags = resolve_str(src);
-        // Page.Resources is known resource infrastructure now; Style is
-        // still unknown to the catalog (it lands there with the M1 styles
-        // unit).
-        assert_eq!(diags.len(), 2);
+        // Page.Resources is known resource infrastructure now, and Style
+        // is a known catalog element since the styles unit landed.
+        assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "WX0006");
-        assert_eq!(diags[1].code, "WX0002");
-        assert_eq!(diags[1].pos.unwrap().row, 4);
+        assert_eq!(diags[0].pos.unwrap().row, 2);
     }
 
     const RESOURCES_DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -894,13 +1312,13 @@ mod tests {
 </Page>"##;
         let tree = parse(DOC).unwrap();
         let (set, diags) = collect_resources(&tree);
-        // WX1003 for the banned "Default" theme key, WX1002 for the bad
-        // color and the unsupported Style type. `Good` still parses (the
-        // parser synthesizes its text into Content).
-        assert_eq!(diags.len(), 3);
+        // WX1003 for the banned "Default" theme key and WX1002 for the
+        // bad color. `Good` still parses (the parser synthesizes its text
+        // into Content); the empty keyed Style `S` parses as a style —
+        // check_style_chains is what flags its missing TargetType.
+        assert_eq!(diags.len(), 2);
         assert_eq!(diags[0].code, "WX1003");
         assert_eq!(diags[1].code, "WX1002");
-        assert_eq!(diags[2].code, "WX1002");
         assert_eq!(
             set.resolve("Good", "0", Theme::Dark),
             Some(&ResourceValue::Color(Rgba {
@@ -910,6 +1328,10 @@ mod tests {
                 b: 0xB0
             }))
         );
+        assert!(matches!(
+            set.resolve("S", "0", Theme::Dark),
+            Some(ResourceValue::Style(_))
+        ));
         assert_eq!(set.resolve("Bad", "0", Theme::Dark), None);
     }
 
@@ -957,6 +1379,158 @@ mod tests {
         assert_eq!(resource_key("{{literal}}", "StaticResource"), None);
         assert_eq!(resource_key("{x:Bind Path}", "StaticResource"), None);
         assert_eq!(resource_key("{StaticResource}", "StaticResource"), None);
+    }
+
+    const STYLES_DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary>
+      <Style x:Key="BaseText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="Foreground" Value="{ThemeResource TextBrush}"/>
+      </Style>
+      <Style x:Key="AccentText" TargetType="TextBlock" BasedOn="{StaticResource BaseText}">
+        <Setter Property="FontSize" Value="16"/>
+      </Style>
+      <Style TargetType="Border">
+        <Style.Setters>
+          <Setter Property="CornerRadius" Value="8"/>
+        </Style.Setters>
+      </Style>
+    </ResourceDictionary>
+  </Page.Resources>
+  <StackPanel Padding="8">
+    <TextBlock Text="a" Style="{StaticResource AccentText}"/>
+    <Border/>
+  </StackPanel>
+</Page>"##;
+
+    #[test]
+    fn styles_resolve_and_apply() {
+        let tree = parse(STYLES_DOC).unwrap();
+        let (set, diags) = collect_resources(&tree);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(check_style_chains(&set, &Catalog::poc_subset()).is_empty());
+
+        // Explicit style: base setters first, derived override last.
+        let bound = &tree.children[0].children[0];
+        let setters = style_setters(&set, bound, "0.0.0", Theme::Dark);
+        assert_eq!(
+            setters,
+            [
+                ("FontSize", "12"),
+                ("Foreground", "{ThemeResource TextBrush}"),
+                ("FontSize", "16")
+            ]
+        );
+        // The Border picks up the implicit style written via
+        // <Style.Setters>; the TextBlock-shaped implicit style does not
+        // leak onto other types.
+        let border = &tree.children[0].children[1];
+        assert_eq!(
+            style_setters(&set, border, "0.0.1", Theme::Dark),
+            [("CornerRadius", "8")]
+        );
+        let page_only: &[(&str, &str)] = &[];
+        assert_eq!(style_setters(&set, &tree, "0", Theme::Dark), page_only);
+    }
+
+    #[test]
+    fn resolve_styles_applies_setters_with_local_precedence() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <Style x:Key="BaseText" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Foreground" Value="#FF111111"/>
+    </Style>
+    <Style x:Key="AccentText" TargetType="TextBlock" BasedOn="{StaticResource BaseText}">
+      <Setter Property="FontSize" Value="16"/>
+    </Style>
+  </Page.Resources>
+  <StackPanel Padding="8">
+    <TextBlock Text="a" Style="{StaticResource AccentText}" Foreground="#FF222222"/>
+    <TextBlock Text="b" Style="{StaticResource AccentText}"/>
+  </StackPanel>
+</Page>"##;
+        let tree = parse(DOC).unwrap();
+        let (set, _) = collect_resources(&tree);
+        let resolved = resolve_styles(&tree, &set, Theme::Dark);
+        // First TextBlock: the local Foreground wins over the setter, and
+        // FontSize comes from the derived style (16, not the base's 12).
+        let first = &resolved.children[0].children[0];
+        assert_eq!(first.attr("FontSize"), Some("16"));
+        assert_eq!(first.attr("Foreground"), Some("#FF222222"));
+        // Second TextBlock: both setters land, including the base's.
+        let second = &resolved.children[0].children[1];
+        assert_eq!(second.attr("FontSize"), Some("16"));
+        assert_eq!(second.attr("Foreground"), Some("#FF111111"));
+    }
+
+    #[test]
+    fn style_chain_diagnostics() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <Style x:Key="A" TargetType="TextBlock" BasedOn="{StaticResource B}"/>
+    <Style x:Key="B" TargetType="TextBlock" BasedOn="{StaticResource A}"/>
+    <Style x:Key="C" TargetType="NoSuchElement"/>
+    <Style x:Key="D" TargetType="TextBlock">
+      <Setter Property="Nope" Value="1"/>
+    </Style>
+    <Style x:Key="E" TargetType="TextBlock" BasedOn="{StaticResource Missing}"/>
+  </Page.Resources>
+</Page>"##;
+        let tree = parse(DOC).unwrap();
+        let (set, collect_diags) = collect_resources(&tree);
+        assert!(collect_diags.is_empty(), "{collect_diags:?}");
+        let diags = check_style_chains(&set, &Catalog::poc_subset());
+        // A and B both detect the cycle, C targets an unknown element, D
+        // sets an unknown property, E bases on a missing key. HashMap
+        // order is not deterministic, so compare the code set.
+        let mut codes: Vec<&str> = diags.iter().map(|d| d.code).collect();
+        codes.sort_unstable();
+        assert_eq!(codes, ["WX0003", "WX1001", "WX1004", "WX1004", "WX1004"]);
+    }
+
+    #[test]
+    fn style_use_target_type_is_checked() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <Style x:Key="T" TargetType="TextBlock"/>
+  </Page.Resources>
+  <Button Style="{StaticResource T}" Content="b"/>
+</Page>"##;
+        let tree = parse(DOC).unwrap();
+        let (set, _) = collect_resources(&tree);
+        let diags = check_resource_references(&tree, &set, Theme::Dark);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1004");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn implicit_style_needs_page_level_scope() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Dark">
+          <Style TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12"/>
+          </Style>
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Page.Resources>
+</Page>"##;
+        let tree = parse(DOC).unwrap();
+        let (set, diags) = collect_resources(&tree);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1002");
+        assert!(set.resolve_implicit_style("TextBlock", "0").is_none());
     }
 
     #[test]

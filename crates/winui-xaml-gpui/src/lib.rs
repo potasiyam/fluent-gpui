@@ -48,10 +48,16 @@ const UNSUPPORTED_ATTRS: &[&str] = &[
     "IsEnabled",
 ];
 
-/// Attributes whose markup extensions the renderer resolves; on any other
-/// attribute an extension warns instead of resolving.
-const RESOLVED_EXTENSION_ATTRS: &[&str] =
-    &["Text", "Content", "Background", "Foreground", "BorderBrush"];
+/// Attributes whose markup extensions the renderer or the model's load
+/// pass resolves; on any other attribute an extension warns instead.
+const RESOLVED_EXTENSION_ATTRS: &[&str] = &[
+    "Text",
+    "Content",
+    "Background",
+    "Foreground",
+    "BorderBrush",
+    "Style",
+];
 
 pub fn render_element<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
     warn_unsupported(el);
@@ -361,9 +367,9 @@ fn resolve_color<V>(
         .or_else(|| resource_key(v, "ThemeResource"))
         .map(|key| match ctx.resources.resolve(key, path, ctx.theme) {
             Some(ResourceValue::Color(c)) => Some(to_gpui(*c)),
-            None => {
+            Some(ResourceValue::Style(_)) | None => {
                 eprintln!(
-                    "[xaml] {attr}=\"{v}\" resolved no resource key \"{key}\"; leaving the property unset"
+                    "[xaml] {attr}=\"{v}\" resolved no color resource \"{key}\"; leaving the property unset"
                 );
                 None
             }

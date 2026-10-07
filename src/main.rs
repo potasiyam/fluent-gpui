@@ -16,7 +16,7 @@ use gpui::{
 use winui_xaml_gpui::{HandlerFn, XamlContext, render_element};
 use winui_xaml_model::{
     Catalog, Diagnostic, ResourceSet, Severity, Theme, check_resource_references,
-    collect_resources, render_diagnostics, resolve,
+    check_style_chains, collect_resources, render_diagnostics, resolve, resolve_styles,
 };
 use winui_xaml_syntax::{XamlElement, parse};
 
@@ -96,10 +96,11 @@ fn backdrop_from_xaml(tree: &XamlElement) -> WindowBackgroundAppearance {
 }
 
 /// All load-time diagnostics for one parsed tree: resource collection,
-/// catalog resolution, and resource-reference checks. Also returns the
-/// collected resources for rendering.
+/// style-chain validation, catalog resolution, and resource-reference
+/// checks. Also returns the collected resources for rendering.
 fn startup_diagnostics(tree: &XamlElement, theme: Theme) -> (ResourceSet, Vec<Diagnostic>) {
     let (resources, mut diags) = collect_resources(tree);
+    diags.extend(check_style_chains(&resources, &Catalog::poc_subset()));
     diags.extend(resolve(tree, &Catalog::poc_subset()));
     diags.extend(check_resource_references(tree, &resources, theme));
     (resources, diags)
@@ -130,6 +131,9 @@ fn main() {
         }
     }
     let backdrop = backdrop_from_xaml(&tree);
+    // Setter values join the attribute set here (local values win); the
+    // renderer renders the resolved tree unchanged.
+    let resolved = resolve_styles(&tree, &resources, theme);
     let handlers = demo_handlers();
 
     gpui_platform::application().run(move |cx: &mut App| {
@@ -146,7 +150,7 @@ fn main() {
             },
             |_, cx| {
                 cx.new(|_| DemoApp {
-                    tree,
+                    tree: resolved,
                     state: AppState::default(),
                     handlers: handlers.clone(),
                     resources,

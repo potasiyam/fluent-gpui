@@ -19,6 +19,20 @@
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
       <SolidColorBrush x:Key="DemoAccentBrush" Color="#FF4EC9B0"/>
+
+      <Style x:Key="BaseText" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="Foreground" Value="{ThemeResource DemoSubtleBrush}"/>
+      </Style>
+      <Style x:Key="AccentText" TargetType="TextBlock" BasedOn="{StaticResource BaseText}">
+        <Setter Property="FontSize" Value="16"/>
+        <Setter Property="Foreground" Value="{StaticResource DemoAccentBrush}"/>
+      </Style>
+      <!-- Implicit style: defaults for every TextBlock without a Style. -->
+      <Style TargetType="TextBlock">
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="Foreground" Value="{ThemeResource DemoSubtleBrush}"/>
+      </Style>
     </ResourceDictionary>
   </Page.Resources>
 
@@ -26,14 +40,14 @@
     <TextBlock Text="WinUI XAML on GPUI" FontSize="34" FontWeight="Bold"
                Foreground="{ThemeResource DemoTextBrush}" HorizontalAlignment="Center" />
     <TextBlock Text="roxmltree parser -> gpui-pre 0.3 renderer (DirectX, Mica backdrop)"
-               FontSize="14" Foreground="{ThemeResource DemoSubtleBrush}" HorizontalAlignment="Center" />
+               HorizontalAlignment="Center" />
 
     <Border Background="{ThemeResource DemoPanelBrush}" CornerRadius="8" Padding="18"
             BorderThickness="1" BorderBrush="{ThemeResource DemoBorderBrush}" HorizontalAlignment="Center">
       <StackPanel Spacing="8">
-        <TextBlock Text="{x:Bind ClicksText}" FontSize="16" Foreground="{StaticResource DemoAccentBrush}" />
+        <TextBlock Text="{x:Bind ClicksText}" Style="{StaticResource AccentText}" />
         <TextBlock Text="State flows: Click handler -> AppState -> {x:Bind} re-render"
-                   FontSize="12" Foreground="{ThemeResource DemoSubtleBrush}" />
+                   Style="{StaticResource BaseText}" />
       </StackPanel>
     </Border>
 
