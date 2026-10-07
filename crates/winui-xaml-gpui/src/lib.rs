@@ -37,17 +37,6 @@ pub struct XamlContext<'a, V: 'static> {
     pub view: WeakEntity<V>,
 }
 
-/// Attributes the PoC knows about but does not implement; warned, never
-/// silently ignored.
-const UNSUPPORTED_ATTRS: &[&str] = &[
-    "MinWidth",
-    "MinHeight",
-    "MaxWidth",
-    "MaxHeight",
-    "VerticalAlignment",
-    "IsEnabled",
-];
-
 /// Attributes whose markup extensions the renderer or the model's load
 /// pass resolves; on any other attribute an extension warns instead.
 const RESOLVED_EXTENSION_ATTRS: &[&str] = &[
@@ -60,7 +49,7 @@ const RESOLVED_EXTENSION_ATTRS: &[&str] = &[
 ];
 
 pub fn render_element<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
-    warn_unsupported(el);
+    warn_unresolved_extensions(el);
     match el.name.as_str() {
         "Page" | "UserControl" => container(el, ctx, path, true),
         "StackPanel" => container(el, ctx, path, false),
@@ -74,26 +63,11 @@ pub fn render_element<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str)
     }
 }
 
-/// Warns on known-unsupported attributes, on property elements (not in the
-/// PoC subset), and on markup extensions outside the attributes the
-/// renderer actually resolves.
-fn warn_unsupported(el: &XamlElement) {
-    for prop in &el.properties {
-        // `.Resources` dictionaries are consumed by the model's resource
-        // unit, not the renderer.
-        if prop.name == format!("{}.Resources", el.name) {
-            continue;
-        }
-        eprintln!(
-            "[xaml] property element <{}> is not supported in the PoC subset; ignored",
-            prop.name
-        );
-    }
-    for attr in UNSUPPORTED_ATTRS {
-        if el.attr(attr).is_some() {
-            eprintln!("[xaml] attribute \"{attr}\" is not implemented in the PoC subset; ignored");
-        }
-    }
+/// Warns on markup extensions in attributes the renderer does not resolve.
+/// Structural unknowns — unknown elements, properties, property elements —
+/// surface as WX diagnostics from the model's load pass instead, so they
+/// are not re-reported here.
+fn warn_unresolved_extensions(el: &XamlElement) {
     for a in &el.attributes {
         let t = a.value.trim();
         if !RESOLVED_EXTENSION_ATTRS.contains(&a.name.as_str())
@@ -335,22 +309,27 @@ fn attr_f32(el: &XamlElement, attr: &str) -> Option<f32> {
 }
 
 /// WinUI edge format: "12", "leftRight,topBottom" (2 values), or
-/// "left,top,right,bottom" (4 values).
+/// "left,top,right,bottom" (4 values). An unparsable part or a wrong count
+/// warns and discards the whole value — no part of a bad value is used.
 fn attr_edges(el: &XamlElement, attr: &str) -> Option<(f32, f32, f32, f32)> {
     let v = el.attr(attr)?.trim().to_string();
-    let parts: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-    let parsed = match parts.len() {
-        1 => Some((parts[0], parts[0], parts[0], parts[0])),
-        2 => Some((parts[0], parts[1], parts[0], parts[1])),
-        4 => Some((parts[0], parts[1], parts[2], parts[3])),
-        _ => None,
+    let tokens: Vec<&str> = v.split(',').map(str::trim).collect();
+    let numbers: Option<Vec<f32>> = tokens.iter().map(|t| t.parse().ok()).collect();
+    let Some(numbers) = numbers else {
+        eprintln!("[xaml] edge value \"{v}\" on \"{attr}\" has an unparsable part; ignored");
+        return None;
     };
-    if parsed.is_none() {
-        eprintln!(
-            "[xaml] edge value \"{v}\" on \"{attr}\" is not 1, 2, or 4 comma-separated numbers; ignored"
-        );
+    match numbers.as_slice() {
+        [a] => Some((*a, *a, *a, *a)),
+        [a, b] => Some((*a, *b, *a, *b)),
+        [a, b, c, d] => Some((*a, *b, *c, *d)),
+        _ => {
+            eprintln!(
+                "[xaml] edge value \"{v}\" on \"{attr}\" is not 1, 2, or 4 comma-separated numbers; ignored"
+            );
+            None
+        }
     }
-    parsed
 }
 
 /// Resolves a color-valued attribute: a `{StaticResource …}`/`{ThemeResource
@@ -362,10 +341,22 @@ fn resolve_color<V>(
     path: &str,
     ctx: &XamlContext<'_, V>,
 ) -> Option<gpui::Rgba> {
-    let v = el.attr(attr)?.trim();
+    resolve_color_value(el.attr(attr)?, attr, path, ctx.resources, ctx.theme)
+}
+
+/// The value-level half of [`resolve_color`], split out so tests can drive
+/// it without a gpui entity.
+fn resolve_color_value(
+    raw: &str,
+    attr: &str,
+    path: &str,
+    resources: &ResourceSet,
+    theme: Theme,
+) -> Option<gpui::Rgba> {
+    let v = raw.trim();
     let parsed = resource_key(v, "StaticResource")
         .or_else(|| resource_key(v, "ThemeResource"))
-        .map(|key| match ctx.resources.resolve(key, path, ctx.theme) {
+        .map(|key| match resources.resolve(key, path, theme) {
             Some(ResourceValue::Color(c)) => Some(to_gpui(*c)),
             Some(ResourceValue::Style(_)) | None => {
                 eprintln!(
@@ -386,4 +377,112 @@ fn resolve_color<V>(
 /// `Rgba` is `#AARRGGBB`-ordered; gpui's rgba() wants 0xRRGGBBAA.
 fn to_gpui(c: Rgba) -> gpui::Rgba {
     gpui::rgba((c.r as u32) << 24 | (c.g as u32) << 16 | (c.b as u32) << 8 | c.a as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winui_xaml_syntax::parse;
+
+    fn resources_from(src: &str) -> ResourceSet {
+        let tree = parse(src).unwrap();
+        let (resources, diags) = winui_xaml_model::collect_resources(&tree);
+        assert!(diags.is_empty(), "{diags:?}");
+        resources
+    }
+
+    #[test]
+    fn to_gpui_reorders_argb_into_rgba() {
+        assert_eq!(
+            to_gpui(Rgba {
+                a: 0x11,
+                r: 0x22,
+                g: 0x33,
+                b: 0x44
+            }),
+            gpui::rgba(0x22334411)
+        );
+    }
+
+    #[test]
+    fn colors_resolve_from_literals_and_resources() {
+        let resources = resources_from(
+            r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <SolidColorBrush x:Key="Accent" Color="#FF4EC9B0"/>
+  </Page.Resources>
+</Page>"##,
+        );
+        let dark = Theme::Dark;
+        let teal = Some(gpui::rgba(0x4EC9B0FF));
+
+        // Literal forms: 8-digit hex, 6-digit hex, named.
+        assert_eq!(
+            resolve_color_value("#FF4EC9B0", "Background", "0", &resources, dark),
+            teal
+        );
+        assert_eq!(
+            resolve_color_value("#4EC9B0", "Background", "0", &resources, dark),
+            teal
+        );
+        assert_eq!(
+            resolve_color_value("transparent", "Background", "0", &resources, dark),
+            Some(gpui::rgba(0x00000000))
+        );
+
+        // Resource lookups at the element's render path.
+        assert_eq!(
+            resolve_color_value(
+                "{StaticResource Accent}",
+                "Background",
+                "0.1",
+                &resources,
+                dark
+            ),
+            teal
+        );
+        assert_eq!(
+            resolve_color_value(
+                "{ThemeResource Accent}",
+                "Foreground",
+                "0",
+                &resources,
+                dark
+            ),
+            teal
+        );
+
+        // Misses and non-colors leave the property unset.
+        assert_eq!(
+            resolve_color_value("{StaticResource Nope}", "Background", "0", &resources, dark),
+            None
+        );
+        assert_eq!(
+            resolve_color_value("{x:Bind SomePath}", "Background", "0", &resources, dark),
+            None
+        );
+        assert_eq!(
+            resolve_color_value("nope", "Background", "0", &resources, dark),
+            None
+        );
+    }
+
+    #[test]
+    fn edge_values_must_fully_parse() {
+        fn edges(v: &str) -> Option<(f32, f32, f32, f32)> {
+            let src = format!(
+                r#"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Margin="{v}"/>"#
+            );
+            let tree = parse(&src).unwrap();
+            attr_edges(&tree, "Margin")
+        }
+        assert_eq!(edges("12"), Some((12.0, 12.0, 12.0, 12.0)));
+        assert_eq!(edges("1,2"), Some((1.0, 2.0, 1.0, 2.0)));
+        assert_eq!(edges("1,2,3,4"), Some((1.0, 2.0, 3.0, 4.0)));
+        // A bad part invalidates the whole value instead of being dropped.
+        assert_eq!(edges("12,abc"), None);
+        assert_eq!(edges("1,2,3"), None);
+        assert_eq!(edges(""), None);
+    }
 }

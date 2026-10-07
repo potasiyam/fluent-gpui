@@ -225,7 +225,7 @@ fn resolve_element(el: &XamlElement, catalog: &Catalog, diags: &mut Vec<Diagnost
             }
         }
 
-        check_markup_extension(el, a.name.as_str(), &a.value, catalog, diags);
+        check_markup_extension(el, a, catalog, diags);
     }
 
     for p in &el.properties {
@@ -266,12 +266,11 @@ fn resolve_element(el: &XamlElement, catalog: &Catalog, diags: &mut Vec<Diagnost
 /// literal brace and `{}` is the empty escape, both per XAML.
 fn check_markup_extension(
     el: &XamlElement,
-    attr: &str,
-    value: &str,
+    a: &Attribute,
     catalog: &Catalog,
     diags: &mut Vec<Diagnostic>,
 ) {
-    let t = value.trim();
+    let t = a.value.trim();
     if !(t.starts_with('{') && t.ends_with('}')) || t.starts_with("{{") {
         return;
     }
@@ -284,11 +283,11 @@ fn check_markup_extension(
         diags.push(Diagnostic::error(
             "WX0005",
             format!(
-                "unknown markup extension `{ext}` on `{attr}` of `{}`",
-                el.name
+                "unknown markup extension `{ext}` on `{}` of `{}`",
+                a.name, el.name
             ),
-            el.pos,
-            el.name.len() as u32 + 1,
+            a.pos,
+            a.value.len() as u32,
         ));
     }
 }
@@ -1152,6 +1151,17 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "WX0005");
         assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn unknown_extension_points_at_the_attribute() {
+        let diags = resolve_str(
+            "<TextBlock xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\"\n  Text=\"{MyExt P}\"/>",
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX0005");
+        // The caret names the attribute, not the element.
+        assert_eq!(diags[0].pos.unwrap(), Pos { row: 2, col: 3 });
     }
 
     #[test]

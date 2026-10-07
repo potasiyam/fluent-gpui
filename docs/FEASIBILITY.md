@@ -141,13 +141,16 @@ on auto-close runs, `cargo test` 2/2.
   implement WinUI's alignment semantics in the model, not ad-hoc wrappers.
 - Button keyboard activation (Space/Enter) and tab stops are absent —
   correctly scoped to M2 (REQ-CTRL-03); recorded so it isn't lost.
-- Diagnostics were stderr warnings only. Now split by layer (2026-10-07):
-  structural unknowns (elements, properties, property elements, markup
-  extension names) come from the `winui-xaml-model` catalog as WX-coded
-  diagnostics with file/line at load time; the renderer's remaining stderr
-  warnings cover value-level issues (unparseable color/edge/number values,
-  binding-path misses) and get absorbed into WX codes as M1 continues.
-  Still missing for REQ-DIAG-01/02: type checks on property values and
+- Diagnostics were stderr warnings only. Now split by layer (2026-10-07;
+  deduplicated after the issue #1 review): structural unknowns (elements,
+  properties, property elements, markup extension names) come from the
+  `winui-xaml-model` catalog as WX-coded diagnostics with file/line at
+  load time, and the renderer no longer re-reports them. The renderer's
+  remaining stderr warnings are value-level (unparseable color/edge/number
+  values, binding-path misses) plus the unresolved-extension note for
+  attributes it cannot resolve; both get absorbed into WX codes as M1
+  continues. Still missing for REQ-DIAG-01/02: type checks on property
+  values (Setter property names are checked; values are not) and
   renderer-side resolution diagnostics.
 - Screenshot evidence has two environment failure modes (2026-10-06): an
   actively used desktop wins the focus race (app renders behind other
