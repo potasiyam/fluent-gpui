@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/winui-xaml-syntax", "crates/winui-xaml-gpui"]
+members = ["crates/winui-xaml-syntax", "crates/winui-xaml-model", "crates/winui-xaml-gpui"]
 
 [package]
 name = "winui-xaml-poc"
@@ -27,4 +27,7 @@ opt-level = 1
 opt-level = 0
 
 [profile.dev.package.winui-xaml-gpui]
+opt-level = 0
+
+[profile.dev.package.winui-xaml-model]
 opt-level = 0
