@@ -94,6 +94,12 @@ keeping — cite the rule ("WinUI defaults `{x:Bind}` to OneTime").
 - Verification habit: never state build/test/benchmark status without having
   run it in the current session. Perf budgets (PRD §13) ship benchmarks with
   the feature, not after.
+- Milestone gates (user rule, 2026-10-07): at the close of each milestone
+  step and at milestone exit, run the full gate — `cargo fmt`,
+  `cargo clippy --all-targets --workspace`, `cargo test --workspace`, and
+  for anything that draws a window, the auto-close render run plus a
+  screenshot — and record the evidence in the owning doc before starting
+  the next step.
 
 ## Commits
 

@@ -67,10 +67,12 @@ cargo test                     # headless: parse tree shape + click->state->bind
 > `gpui::Application::new().run(…)`; everything else compiled unchanged.
 > `SystemBackdrop="Mica"` on the page root maps to
 > `WindowBackgroundAppearance::MicaBackdrop` (a `WindowOptions` field,
-> gpui-pre 0.3.8 `src/platform.rs`), exercised by demo.xaml. Visual
-> confirmation of the rendered Mica window is pending: the workstation
-> session locked mid-check and GDI capture fails on a locked session (see
-> friction list).
+> gpui-pre 0.3.8 `src/platform.rs`), exercised by demo.xaml. Render evidence
+> on gpui-pre: `gpui-pre-screenshot.png` (2026-10-07), captured with
+> `scripts/screenshot-window.ps1` — a PrintWindow of the app window itself,
+> which needs no focus. The Mica tint is not distinguishable in a
+> window-surface capture (DWM composites the backdrop outside the app
+> surface); the applied window option is the code-level evidence.
 
 Evidence: `poc-screenshot.png` (rendered window, captured mid-run), exit code 0
 on auto-close runs, `cargo test` 2/2.
@@ -104,9 +106,13 @@ on auto-close runs, `cargo test` 2/2.
   actively used desktop wins the focus race (app renders behind other
   windows), and a locked session makes GDI `CopyFromScreen` fail with "The
   handle is invalid" entirely (observed: capture worked 22:51, failed 22:55
-  with the unchanged script; LogonUI running). `scripts/screenshot-focused.ps1`
-  handles the first half by forcing the app window to the foreground; the
-  second half simply must wait for unlock.
+  with the unchanged script; LogonUI running). Resolution (2026-10-07):
+  `scripts/screenshot-window.ps1` uses PrintWindow with
+  PW_RENDERFULLCONTENT — no focus needed, works regardless of what is in
+  the foreground. Use it as the default evidence capture; it cannot show
+  the DWM backdrop tint (composited outside the app surface), and
+  `screenshot-focused.ps1` stays for whole-desktop shots when that is
+  explicitly wanted.
 - Docs incident (2026-10-06): one app's hand-rolled Fluent layer was
   weighted as [V] "field evidence" and promoted into PRD requirements; the
   owner corrected — it is one anecdotal data point, not a validated example.
