@@ -6506,12 +6506,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "winui-xaml-model"
+version = "0.1.0"
+dependencies = [
+ "winui-xaml-syntax",
+]
+
+[[package]]
 name = "winui-xaml-poc"
 version = "0.1.0"
 dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "winui-xaml-gpui",
+ "winui-xaml-model",
  "winui-xaml-syntax",
 ]
 

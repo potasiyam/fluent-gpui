@@ -77,6 +77,18 @@ cargo test                     # headless: parse tree shape + click->state->bind
 Evidence: `poc-screenshot.png` (rendered window, captured mid-run), exit code 0
 on auto-close runs, `cargo test` 2/2.
 
+> **Update (2026-10-07, M1 catalog diagnostics):** `winui-xaml-model` now
+> owns the element/property catalog and the WX-coded diagnostics
+> (WX0002–WX0007: unknown element/property, property elements, attached
+> properties, unknown markup extensions, recognized-but-unimplemented
+> properties), each carrying its 1:1 source position, plus a codespan-style
+> plain-text emitter. The PoC host resolves the tree against the catalog at
+> load: any error exits 1 before a window opens; warnings print and
+> rendering continues. A workspace test pins demo.xaml to resolve clean.
+> Evidence: `cargo test --workspace` 13/13, `POC_AUTOCLOSE_SECS=12 cargo
+> run` exit 0, `m1-catalog-diagnostics.png` (PrintWindow capture; visuals
+> unchanged by design).
+
 ## Friction found (goes into M1 backlog)
 
 - A `Click` handler that mutates state must call `cx.notify()` inside the
@@ -95,13 +107,14 @@ on auto-close runs, `cargo test` 2/2.
   implement WinUI's alignment semantics in the model, not ad-hoc wrappers.
 - Button keyboard activation (Space/Enter) and tab stops are absent —
   correctly scoped to M2 (REQ-CTRL-03); recorded so it isn't lost.
-- Diagnostics are stderr warnings only. After the 2026-10-04 review fixes
-  they cover: unknown elements, dropped element children, unsupported
-  attributes (Min/Max size, VerticalAlignment, IsEnabled), markup extensions
-  on non-Text/Content attributes, unparseable color/edge/number values, and
-  binding-path misses/malformations. The parser now carries 1:1 source
-  positions end-to-end (2026-10-06); the WX-code emitter with catalog-backed
-  unknown-element diagnostics is the remaining M1 work (REQ-DIAG-01/02).
+- Diagnostics were stderr warnings only. Now split by layer (2026-10-07):
+  structural unknowns (elements, properties, property elements, markup
+  extension names) come from the `winui-xaml-model` catalog as WX-coded
+  diagnostics with file/line at load time; the renderer's remaining stderr
+  warnings cover value-level issues (unparseable color/edge/number values,
+  binding-path misses) and get absorbed into WX codes as M1 continues.
+  Still missing for REQ-DIAG-01/02: type checks on property values and
+  renderer-side resolution diagnostics.
 - Screenshot evidence has two environment failure modes (2026-10-06): an
   actively used desktop wins the focus race (app renders behind other
   windows), and a locked session makes GDI `CopyFromScreen` fail with "The

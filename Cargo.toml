@@ -16,6 +16,7 @@ publish = false
 gpui = { package = "gpui-pre", version = "0.3" }
 gpui_platform = { package = "gpui-pre-platform", version = "0.3" }
 winui-xaml-syntax = { path = "crates/winui-xaml-syntax" }
+winui-xaml-model = { path = "crates/winui-xaml-model" }
 winui-xaml-gpui = { path = "crates/winui-xaml-gpui" }
 
 # Optimize dependencies even in dev builds; gpui is unusably slow fully

@@ -14,6 +14,7 @@ use gpui::{
     WindowOptions, prelude::*, px, size,
 };
 use winui_xaml_gpui::{HandlerFn, XamlContext, render_element};
+use winui_xaml_model::{Catalog, Severity, render_diagnostics, resolve};
 use winui_xaml_syntax::{XamlElement, parse};
 
 /// Host state the XAML can reach through `{x:Bind PropertyName}`.
@@ -97,6 +98,19 @@ fn main() {
         }
     };
     let tree = parse(&xaml_src).expect("XAML failed to parse");
+    // REQ-DIAG-01/02: catalog diagnostics with file/line at load. Errors
+    // stop the run before a window opens; warnings print and rendering
+    // continues.
+    let diags = resolve(&tree, &Catalog::poc_subset());
+    if !diags.is_empty() {
+        eprint!(
+            "{}",
+            render_diagnostics(&xaml_path.display().to_string(), &xaml_src, &diags)
+        );
+        if diags.iter().any(|d| d.severity == Severity::Error) {
+            std::process::exit(1);
+        }
+    }
     let backdrop = backdrop_from_xaml(&tree);
     let handlers = demo_handlers();
 
@@ -140,6 +154,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_resolves_clean_against_the_catalog() {
+        let src = std::fs::read_to_string(demo_xaml_path()).unwrap();
+        let tree = parse(&src).unwrap();
+        assert!(
+            resolve(&tree, &Catalog::poc_subset()).is_empty(),
+            "demo.xaml must stay inside the PoC dialect"
+        );
+    }
 
     #[test]
     fn click_attr_resolves_and_drives_state() {
