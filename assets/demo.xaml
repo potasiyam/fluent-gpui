@@ -2,18 +2,38 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       SystemBackdrop="Mica">
 
+  <Page.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="DemoTextBrush" Color="#FF1F1F1F"/>
+          <SolidColorBrush x:Key="DemoSubtleBrush" Color="#FF606060"/>
+          <SolidColorBrush x:Key="DemoPanelBrush" Color="#FFFFFFFF"/>
+          <SolidColorBrush x:Key="DemoBorderBrush" Color="#FFC9C9C9"/>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="DemoTextBrush" Color="#FFF3F3F3"/>
+          <SolidColorBrush x:Key="DemoSubtleBrush" Color="#FF9C9C9C"/>
+          <SolidColorBrush x:Key="DemoPanelBrush" Color="#FF2D2D30"/>
+          <SolidColorBrush x:Key="DemoBorderBrush" Color="#FF3F3F46"/>
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+      <SolidColorBrush x:Key="DemoAccentBrush" Color="#FF4EC9B0"/>
+    </ResourceDictionary>
+  </Page.Resources>
+
   <StackPanel Spacing="14" Padding="36,28,36,28" HorizontalAlignment="Center">
     <TextBlock Text="WinUI XAML on GPUI" FontSize="34" FontWeight="Bold"
-               Foreground="#FFF3F3F3" HorizontalAlignment="Center" />
+               Foreground="{ThemeResource DemoTextBrush}" HorizontalAlignment="Center" />
     <TextBlock Text="roxmltree parser -> gpui-pre 0.3 renderer (DirectX, Mica backdrop)"
-               FontSize="14" Foreground="#FF9C9C9C" HorizontalAlignment="Center" />
+               FontSize="14" Foreground="{ThemeResource DemoSubtleBrush}" HorizontalAlignment="Center" />
 
-    <Border Background="#FF2D2D30" CornerRadius="8" Padding="18"
-            BorderThickness="1" BorderBrush="#FF3F3F46" HorizontalAlignment="Center">
+    <Border Background="{ThemeResource DemoPanelBrush}" CornerRadius="8" Padding="18"
+            BorderThickness="1" BorderBrush="{ThemeResource DemoBorderBrush}" HorizontalAlignment="Center">
       <StackPanel Spacing="8">
-        <TextBlock Text="{x:Bind ClicksText}" FontSize="16" Foreground="#FF4EC9B0" />
+        <TextBlock Text="{x:Bind ClicksText}" FontSize="16" Foreground="{StaticResource DemoAccentBrush}" />
         <TextBlock Text="State flows: Click handler -> AppState -> {x:Bind} re-render"
-                   FontSize="12" Foreground="#FF808080" />
+                   FontSize="12" Foreground="{ThemeResource DemoSubtleBrush}" />
       </StackPanel>
     </Border>
 

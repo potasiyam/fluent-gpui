@@ -3,18 +3,21 @@
 //! types (PLAN §3).
 //!
 //! PoC subset: Page/UserControl, StackPanel, TextBlock, Border, Button,
-//! rendered bottom-up into owned `AnyElement`s. Unsupported constructs warn
-//! on stderr instead of failing silently; M1 replaces the warnings with real
-//! file/line diagnostics (PRD REQ-DIAG-01/02).
+//! rendered bottom-up into owned `AnyElement`s; color attributes resolve
+//! `{StaticResource}`/`{ThemeResource}` against the model's `ResourceSet`
+//! (REQ-RES-01). Structural unknowns surface as WX diagnostics from
+//! winui-xaml-model at load (REQ-DIAG-01/02); the renderer's remaining
+//! stderr warnings are value-level.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement, SharedString, StatefulInteractiveElement,
-    Styled, WeakEntity, div, prelude::*, px, relative, rgb, rgba,
+    Styled, WeakEntity, div, prelude::*, px, relative, rgb,
 };
 
+use winui_xaml_model::{ResourceSet, ResourceValue, Rgba, Theme, parse_color, resource_key};
 use winui_xaml_syntax::XamlElement;
 
 /// Host handler keyed by the `Click="Name"` attribute value; it only touches
@@ -25,6 +28,11 @@ pub type HandlerFn<V> = Arc<dyn Fn(&mut V)>;
 pub struct XamlContext<'a, V: 'static> {
     pub handlers: &'a HashMap<String, HandlerFn<V>>,
     pub bindings: &'a HashMap<String, String>,
+    /// Collected page resources (REQ-RES-01); `{StaticResource}` and
+    /// `{ThemeResource}` values resolve against it.
+    pub resources: &'a ResourceSet,
+    /// Active theme for theme-dictionary lookups.
+    pub theme: Theme,
     /// Lets `Click=` handlers mutate the owning view and re-render it.
     pub view: WeakEntity<V>,
 }
@@ -40,12 +48,17 @@ const UNSUPPORTED_ATTRS: &[&str] = &[
     "IsEnabled",
 ];
 
+/// Attributes whose markup extensions the renderer resolves; on any other
+/// attribute an extension warns instead of resolving.
+const RESOLVED_EXTENSION_ATTRS: &[&str] =
+    &["Text", "Content", "Background", "Foreground", "BorderBrush"];
+
 pub fn render_element<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
     warn_unsupported(el);
     match el.name.as_str() {
         "Page" | "UserControl" => container(el, ctx, path, true),
         "StackPanel" => container(el, ctx, path, false),
-        "TextBlock" => align_wrap(el, text_block(el, ctx)),
+        "TextBlock" => align_wrap(el, text_block(el, ctx, path)),
         "Border" => align_wrap(el, border(el, ctx, path)),
         "Button" => align_wrap(el, button(el, ctx, path)),
         other => {
@@ -56,10 +69,15 @@ pub fn render_element<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str)
 }
 
 /// Warns on known-unsupported attributes, on property elements (not in the
-/// PoC subset), and on markup extensions outside `Text`/`Content` (the only
-/// attributes whose extensions get resolved).
+/// PoC subset), and on markup extensions outside the attributes the
+/// renderer actually resolves.
 fn warn_unsupported(el: &XamlElement) {
     for prop in &el.properties {
+        // `.Resources` dictionaries are consumed by the model's resource
+        // unit, not the renderer.
+        if prop.name == format!("{}.Resources", el.name) {
+            continue;
+        }
         eprintln!(
             "[xaml] property element <{}> is not supported in the PoC subset; ignored",
             prop.name
@@ -72,9 +90,12 @@ fn warn_unsupported(el: &XamlElement) {
     }
     for a in &el.attributes {
         let t = a.value.trim();
-        if a.name != "Text" && a.name != "Content" && t.starts_with('{') && t.ends_with('}') {
+        if !RESOLVED_EXTENSION_ATTRS.contains(&a.name.as_str())
+            && t.starts_with('{')
+            && t.ends_with('}')
+        {
             eprintln!(
-                "[xaml] markup extension on \"{}\" is only resolved on Text/Content in the PoC subset; ignored",
+                "[xaml] markup extension on \"{}\" is only resolved on Text/Content and color attributes in the PoC subset; ignored",
                 a.name
             );
         }
@@ -117,7 +138,7 @@ fn container<V>(
     if let Some((l, t, r, b)) = attr_edges(el, "Padding") {
         d = d.pl(px(l)).pt(px(t)).pr(px(r)).pb(px(b));
     }
-    if let Some(bg) = attr_color(el, "Background") {
+    if let Some(bg) = resolve_color(el, "Background", path, ctx) {
         d = d.bg(bg);
     }
 
@@ -132,7 +153,7 @@ fn container<V>(
     apply_common(d, el).into_any_element()
 }
 
-fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>) -> AnyElement {
+fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
     if !el.children.is_empty() {
         eprintln!(
             "[xaml] <TextBlock> element children are not supported in the PoC subset; dropped"
@@ -147,7 +168,7 @@ fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>) -> AnyElement {
     if let Some(fs) = attr_f32(el, "FontSize") {
         d = d.text_size(px(fs));
     }
-    if let Some(c) = attr_color(el, "Foreground") {
+    if let Some(c) = resolve_color(el, "Foreground", path, ctx) {
         d = d.text_color(c);
     }
     if el
@@ -161,7 +182,7 @@ fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>) -> AnyElement {
 
 fn border<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
     let mut d = div().flex().flex_col();
-    if let Some(bg) = attr_color(el, "Background") {
+    if let Some(bg) = resolve_color(el, "Background", path, ctx) {
         d = d.bg(bg);
     }
     if let Some(cr) = attr_f32(el, "CornerRadius") {
@@ -170,7 +191,7 @@ fn border<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyEleme
     // PoC approximation: any BorderThickness > 0 renders as 1px.
     if attr_f32(el, "BorderThickness").is_some_and(|t| t > 0.0) {
         d = d.border_1();
-        if let Some(bc) = attr_color(el, "BorderBrush") {
+        if let Some(bc) = resolve_color(el, "BorderBrush", path, ctx) {
             d = d.border_color(bc);
         }
     }
@@ -326,34 +347,37 @@ fn attr_edges(el: &XamlElement, attr: &str) -> Option<(f32, f32, f32, f32)> {
     parsed
 }
 
-fn attr_color(el: &XamlElement, attr: &str) -> Option<gpui::Rgba> {
+/// Resolves a color-valued attribute: a `{StaticResource …}`/`{ThemeResource
+/// …}` value looks up the context resources at the element's render path,
+/// anything else parses as a WinUI color literal.
+fn resolve_color<V>(
+    el: &XamlElement,
+    attr: &str,
+    path: &str,
+    ctx: &XamlContext<'_, V>,
+) -> Option<gpui::Rgba> {
     let v = el.attr(attr)?.trim();
-    let parsed = if let Some(hex) = v.strip_prefix('#') {
-        match hex.len() {
-            6 => u32::from_str_radix(hex, 16).ok().map(rgb),
-            8 => {
-                // WinUI hex is #AARRGGBB; gpui rgba() wants 0xRRGGBBAA.
-                let aa = u32::from_str_radix(&hex[0..2], 16).ok();
-                let val = u32::from_str_radix(&hex[2..], 16).ok();
-                match (aa, val) {
-                    (Some(aa), Some(val)) => Some(rgba(val << 8 | aa)),
-                    _ => None,
-                }
+    let parsed = resource_key(v, "StaticResource")
+        .or_else(|| resource_key(v, "ThemeResource"))
+        .map(|key| match ctx.resources.resolve(key, path, ctx.theme) {
+            Some(ResourceValue::Color(c)) => Some(to_gpui(*c)),
+            None => {
+                eprintln!(
+                    "[xaml] {attr}=\"{v}\" resolved no resource key \"{key}\"; leaving the property unset"
+                );
+                None
             }
-            _ => None,
-        }
-    } else {
-        match v.to_ascii_lowercase().as_str() {
-            "black" => Some(rgb(0x000000)),
-            "white" => Some(rgb(0xFFFFFF)),
-            "transparent" => Some(gpui::transparent_black().into()),
-            _ => None,
-        }
-    };
+        })
+        .unwrap_or_else(|| parse_color(v).map(to_gpui));
     if parsed.is_none() && !v.starts_with('{') {
         eprintln!(
             "[xaml] color \"{v}\" on \"{attr}\" is not in the PoC subset (6/8-digit #hex, black/white/transparent); ignored"
         );
     }
     parsed
+}
+
+/// `Rgba` is `#AARRGGBB`-ordered; gpui's rgba() wants 0xRRGGBBAA.
+fn to_gpui(c: Rgba) -> gpui::Rgba {
+    gpui::rgba((c.r as u32) << 24 | (c.g as u32) << 16 | (c.b as u32) << 8 | c.a as u32)
 }

@@ -89,6 +89,22 @@ on auto-close runs, `cargo test` 2/2.
 > run` exit 0, `m1-catalog-diagnostics.png` (PrintWindow capture; visuals
 > unchanged by design).
 
+> **Update (2026-10-07, M1 resources):** the model collects `.Resources`
+> dictionaries — plain entries plus `ThemeDictionaries` for
+> Light/Dark/HighContrast — into a `ResourceSet`, and the renderer resolves
+> `{StaticResource}`/`{ThemeResource}` in color attributes against it:
+> nearest element scope wins, and within a scope the active theme's
+> dictionary wins over plain entries. Unresolvable `{StaticResource}` keys
+> are WX1001 errors at load (matching WinUI's parse exception);
+> unparsable/unsupported entries are WX1002, unknown theme keys WX1003 —
+> WinUI's `"Default"` theme key is rejected per the vendored authoring
+> rules. demo.xaml now colors everything through theme-keyed brushes and
+> renders identically to the previous literal-hex version. Evidence:
+> `cargo test --workspace` 18/18, `POC_AUTOCLOSE_SECS=12` exit 0 with an
+> empty stderr, `m1-resources-themeresource.png`. Not yet from REQ-RES-01:
+> `MergedDictionaries`, dictionary `Source` files, and `{ThemeResource}`
+> re-resolution on theme switch (rides with the token/theme engine).
+
 ## Friction found (goes into M1 backlog)
 
 - A `Click` handler that mutates state must call `cx.notify()` inside the

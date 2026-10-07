@@ -14,7 +14,10 @@ use gpui::{
     WindowOptions, prelude::*, px, size,
 };
 use winui_xaml_gpui::{HandlerFn, XamlContext, render_element};
-use winui_xaml_model::{Catalog, Severity, render_diagnostics, resolve};
+use winui_xaml_model::{
+    Catalog, Diagnostic, ResourceSet, Severity, Theme, check_resource_references,
+    collect_resources, render_diagnostics, resolve,
+};
 use winui_xaml_syntax::{XamlElement, parse};
 
 /// Host state the XAML can reach through `{x:Bind PropertyName}`.
@@ -27,6 +30,8 @@ struct DemoApp {
     tree: XamlElement,
     state: AppState,
     handlers: HashMap<String, HandlerFn<DemoApp>>,
+    resources: ResourceSet,
+    theme: Theme,
     backdrop: WindowBackgroundAppearance,
 }
 
@@ -51,6 +56,8 @@ impl Render for DemoApp {
         let ctx = XamlContext {
             handlers: &self.handlers,
             bindings: &bindings,
+            resources: &self.resources,
+            theme: self.theme,
             view: cx.entity().downgrade(),
         };
 
@@ -88,6 +95,16 @@ fn backdrop_from_xaml(tree: &XamlElement) -> WindowBackgroundAppearance {
     }
 }
 
+/// All load-time diagnostics for one parsed tree: resource collection,
+/// catalog resolution, and resource-reference checks. Also returns the
+/// collected resources for rendering.
+fn startup_diagnostics(tree: &XamlElement, theme: Theme) -> (ResourceSet, Vec<Diagnostic>) {
+    let (resources, mut diags) = collect_resources(tree);
+    diags.extend(resolve(tree, &Catalog::poc_subset()));
+    diags.extend(check_resource_references(tree, &resources, theme));
+    (resources, diags)
+}
+
 fn main() {
     let xaml_path = demo_xaml_path();
     let xaml_src = match std::fs::read_to_string(&xaml_path) {
@@ -98,10 +115,11 @@ fn main() {
         }
     };
     let tree = parse(&xaml_src).expect("XAML failed to parse");
-    // REQ-DIAG-01/02: catalog diagnostics with file/line at load. Errors
-    // stop the run before a window opens; warnings print and rendering
-    // continues.
-    let diags = resolve(&tree, &Catalog::poc_subset());
+    // The demo renders dark; OS theme detection arrives with REQ-TOK-01.
+    let theme = Theme::Dark;
+    // REQ-DIAG-01/02: load-time diagnostics with file/line. Errors stop the
+    // run before a window opens; warnings print and rendering continues.
+    let (resources, diags) = startup_diagnostics(&tree, theme);
     if !diags.is_empty() {
         eprint!(
             "{}",
@@ -131,6 +149,8 @@ fn main() {
                     tree,
                     state: AppState::default(),
                     handlers: handlers.clone(),
+                    resources,
+                    theme,
                     backdrop,
                 })
             },
@@ -159,9 +179,10 @@ mod tests {
     fn demo_resolves_clean_against_the_catalog() {
         let src = std::fs::read_to_string(demo_xaml_path()).unwrap();
         let tree = parse(&src).unwrap();
+        let (_, diags) = startup_diagnostics(&tree, Theme::Dark);
         assert!(
-            resolve(&tree, &Catalog::poc_subset()).is_empty(),
-            "demo.xaml must stay inside the PoC dialect"
+            diags.is_empty(),
+            "demo.xaml must stay inside the PoC dialect: {diags:?}"
         );
     }
 
@@ -188,6 +209,8 @@ mod tests {
             tree,
             state: AppState::default(),
             handlers: demo_handlers(),
+            resources: ResourceSet::default(),
+            theme: Theme::Dark,
             backdrop: WindowBackgroundAppearance::Opaque,
         };
         // Arc clone: the call takes &mut app while the handler stays alive.

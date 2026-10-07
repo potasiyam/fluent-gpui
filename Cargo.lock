@@ -6502,6 +6502,7 @@ name = "winui-xaml-gpui"
 version = "0.1.0"
 dependencies = [
  "gpui-pre",
+ "winui-xaml-model",
  "winui-xaml-syntax",
 ]
 
