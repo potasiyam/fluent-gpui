@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/winui-xaml-syntax", "crates/winui-xaml-model", "crates/winui-xaml-gpui"]
+
 [package]
 name = "winui-xaml-poc"
 version = "0.1.0"
@@ -6,10 +9,26 @@ license = "MIT"
 publish = false
 
 [dependencies]
-gpui = "0.2"
-roxmltree = "0.20"
+# gpui-pre is the live gpui snapshot line (PLAN §1); the official 0.2 crate is
+# a stale one-off and must not be "upgraded" back to. gpui-pre-platform picks
+# the OS backend (DirectX/DirectWrite on Windows, no features needed). Caret
+# "0.3" auto-accepts new snapshots on the line; Cargo.lock holds the exact one.
+gpui = { package = "gpui-pre", version = "0.3" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3" }
+winui-xaml-syntax = { path = "crates/winui-xaml-syntax" }
+winui-xaml-model = { path = "crates/winui-xaml-model" }
+winui-xaml-gpui = { path = "crates/winui-xaml-gpui" }
 
 # Optimize dependencies even in dev builds; gpui is unusably slow fully
-# unoptimized (font shaping, layout). Our own crate stays debuggable.
+# unoptimized (font shaping, layout). Our own crates stay debuggable.
 [profile.dev.package."*"]
 opt-level = 1
+
+[profile.dev.package.winui-xaml-syntax]
+opt-level = 0
+
+[profile.dev.package.winui-xaml-gpui]
+opt-level = 0
+
+[profile.dev.package.winui-xaml-model]
+opt-level = 0

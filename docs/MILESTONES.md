@@ -68,11 +68,11 @@ PRD §15); they receive PRD REQ-IDs when their milestone starts (YAGNI).
   (last-added wins [V]), ThemeDictionaries **Light/Dark/HighContrast**.
   WinUI also accepts a `"Default"` theme key [V]; our lint still warns on
   it per the vendored authoring rules [D]. ResourceDictionary loaded from
-  a separate file via `Source` [V]. **+**
+  a separate file via `Source` (REQ-RES-01) [V].
 - Styles (REQ-RES-02): `Style`/`Setter`/`BasedOn`; implicit styles keyed
   by TargetType [V]. Library default styles as embedded XAML.
-- **+** Property value inheritance (FontFamily/FontSize/FontWeight/
-  Foreground/FlowDirection down the tree) — WinUI semantics [D].
+- Property value inheritance (FontFamily/FontSize/FontWeight/
+  Foreground/FlowDirection down the tree) — WinUI semantics (REQ-PROP-01) [D].
 - Tokens (REQ-TOK-01..05), focus visuals (REQ-FX-06), events (REQ-EVT-01),
   diagnostics (REQ-DIAG-01/02), host window shell.
 

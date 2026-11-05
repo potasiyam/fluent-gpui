@@ -64,7 +64,8 @@ drift is a contained port, and (b) a regular `cargo update` + test +
 render-check cadence so breakage is caught within days, not discovered
 stacked up behind a frozen pin. Note `Cargo.lock` still records the exact
 snapshot any given build used — the requirement governs what updates are
-*allowed*, not what is silently pulled. The abandoned official 0.2.2 remains
+*allowed*, not what is silently pulled (currently 0.3.8, zed@279fe07, since
+the 2026-10-06 port). The abandoned official 0.2.2 remains
 recorded as the PoC's foundation. A `SystemBackdrop="Mica"` XAML attribute
 maps 1:1 onto `WindowBackgroundAppearance::MicaBackdrop` — no DWM code of
 ours required on Windows 11 22H2+.
