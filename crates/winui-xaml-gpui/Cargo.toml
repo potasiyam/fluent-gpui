@@ -1,0 +1,13 @@
+[package]
+name = "winui-xaml-gpui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+# This is the only crate in the workspace allowed to touch gpui types
+# (PLAN §3 backend isolation); gpui-pre is the live snapshot line (PLAN §1).
+gpui = { package = "gpui-pre", version = "0.3" }
+winui-xaml-syntax = { path = "../winui-xaml-syntax" }
+winui-xaml-model = { path = "../winui-xaml-model" }

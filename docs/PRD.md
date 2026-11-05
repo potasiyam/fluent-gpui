@@ -142,7 +142,8 @@ tracked as an open question for the exclusion-blend acrylic layer (§7.3).
 ### 5.3 Resources and styles
 - REQ-RES-01 (Must, M1): `ResourceDictionary`, `x:Key`, merged dictionaries,
   `ThemeDictionaries` with **Light, Dark, HighContrast** keys (a "Default"
-  key is a diagnostic warning, per the vendored theming rules).
+  key is a diagnostic warning, per the vendored theming rules); dictionaries
+  load from separate files via `Source` [V — MS Learn xaml-resource-dictionary].
 - REQ-RES-02 (Must, M1): `Style`/`Setter` blocks, `BasedOn` inheritance;
   library default styles ship as embedded XAML compiled into the crate.
 - REQ-RES-03 (Should, M2): `DataTemplate` + `x:DataType` (typed item
@@ -169,6 +170,11 @@ tracked as an open question for the exclusion-blend acrylic layer (§7.3).
   `FlowDirection` supported on all layout containers (taffy direction
   properties), verified with mirrored gallery pages.
 
+### 5.7 Property system
+- REQ-PROP-01 (Must, M1): property value inheritance down the visual tree for
+  `FontFamily`, `FontSize`, `FontWeight`, `Foreground`, `FlowDirection` —
+  WinUI semantics [D — promoted from MILESTONES §3 at M1 start].
+
 ## 6. Design tokens (Fluent 2) — the full inventory
 
 Source of truth for names/values: vendored `winui-design/references/brushes-and-icons.md`
@@ -194,8 +200,9 @@ theme dictionaries.
   `Subtitle`(20) `BodyLarge`(18) `BodyStrong`(14 semi-bold) `Body`(14)
   `Caption`(12), `Display`(68) — plus `SymbolThemeFontFamily` indirection
   for icons.
-  (Sizes per Fluent 2 type ramp [V — Fluent 2 public spec]; values in
-  tokens.rs with a single override point.) [D on exact px audit at M2]
+  (Sizes per Fluent 2 type ramp [V — Fluent 2 public spec]; values ship in
+  the embedded token dictionary
+  `crates/winui-xaml-model/assets/fluent-tokens.xaml`.) [D on exact px audit at M2]
 - REQ-TOK-03 (Must, M1): **spacing** 4px grid, **corner radius** tokens
   (`ControlCornerRadius`=4, `OverlayCornerRadius`=8) [V — vendored rules],
   **elevation** shadow tokens (§8.2).
@@ -210,7 +217,12 @@ theme dictionaries.
   dictionaries. `AnimatedIcon` in §9.2 (REQ-MOT-08).
 - REQ-TOK-05 (Must, M1): theme switch at runtime (`RequestedTheme` on any
   subtree root) re-resolves `{ThemeResource}` without window recreation;
-  `{StaticResource}` stays put — matching WinUI semantics.
+  `{StaticResource}` stays put — matching WinUI semantics. Our
+  `RequestedTheme` value domain extends WinUI's `ElementTheme`
+  (Default/Light/Dark) with `HighContrast` [D]: gpui-pre 0.3.8's
+  `WindowAppearance` has no HighContrast variant, so the explicit subtree
+  override over the token catalog's HC dictionary is the PoC's HC surface;
+  OS HighContrast detection would need a registry read (deferred).
 
 ## 7. Materials
 
