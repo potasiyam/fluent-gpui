@@ -293,3 +293,26 @@ mechanics (runtime trees, event/state loop) are proven.
 > `m1-live-theme-switch-after.png` (the same window 11 seconds later,
 > re-resolved to Light brushes). `cargo fmt` and `cargo clippy
 > --all-targets --workspace` clean.
+
+> **Update (2026-11-05, M1 x: directives):** the model no longer skips
+> `x:`-prefixed attributes wholesale — each directive now has a rule and
+> the unknown ones fail loud (MILESTONES §3 M1). `x:Name` is checked for
+> per-namescope uniqueness (one page is one namescope; a duplicate is
+> WX0008 at the second occurrence); `x:Uid` and `x:Key` are accepted
+> (substitution ships at M7); `x:Class` is rejected with WX0009, citing
+> the N1 non-goal (no codegen; the Rust host owns event wiring); an
+> unknown `x:` directive is WX0010. `{x:Null}` is rejected with WX0011 on
+> properties where WinUI throws on null (the documented crash site,
+> `Converter={x:Null}`; the list lives in
+> `X_NULL_CRASH_PROPERTIES`) and accepted everywhere else. The syntax
+> layer now keeps the `x:` prefix on XAML-language-namespace elements, so
+> the intrinsic types `x:Boolean`/`x:Double`/`x:String` arrive in the
+> model under their WinUI-exact names and coerce as resource entries
+> (Boolean true/false case-insensitive, Double f64, malformed → WX1002).
+> No demo or window change. Evidence: `cargo test --workspace` 55/55
+> (new tests: duplicate `x:Name` errors while unique names pass, `x:Uid`
+> + `xml:*` accepted silently, `x:Class` rejection cites N1, unknown
+> directive fails loud, `{x:Null}` crash-site rejection vs acceptance
+> elsewhere, intrinsic coercion incl. malformed values; plus a syntax
+> test for the preserved `x:` element prefix), `cargo clippy
+> --all-targets --workspace` clean, `cargo fmt` clean.

@@ -15,6 +15,10 @@
 //! | WX0005 | unknown markup extension |
 //! | WX0006 | attached property (dotted attribute) not implemented yet |
 //! | WX0007 | WinUI property recognized but not implemented yet |
+//! | WX0008 | duplicate `x:Name` in one namescope |
+//! | WX0009 | `x:Class` rejected (no codegen; N1) |
+//! | WX0010 | unknown `x:` directive |
+//! | WX0011 | `{x:Null}` on a property where WinUI throws (PRD §5.2) |
 //! | WX1001 | unresolved `{StaticResource}`/`{ThemeResource}` key |
 //! | WX1002 | malformed resource entry (no key, unparsable color, unsupported type) |
 //! | WX1003 | unknown `ThemeDictionaries` key |
@@ -111,6 +115,11 @@ const UNIMPLEMENTED_PROPERTIES: &[&str] = &[
     "VerticalAlignment",
 ];
 
+/// Properties where WinUI throws on a null value (PRD §5.2 [D] — the
+/// documented crash site is `Converter={x:Null}`); `{x:Null}` is rejected
+/// there and accepted everywhere else.
+const X_NULL_CRASH_PROPERTIES: &[&str] = &["Converter"];
+
 /// The element/property registry a XAML file resolves against.
 pub struct Catalog {
     /// Element name -> element-specific property names. The common set in
@@ -156,6 +165,11 @@ impl Catalog {
             ("Color", &["Content"]),
             ("CornerRadius", &["Content"]),
             ("FontFamily", &["Content"]),
+            // x: intrinsic types (MILESTONES §3 M1); the resource collector
+            // coerces their text.
+            ("x:Boolean", &["Content"]),
+            ("x:Double", &["Content"]),
+            ("x:String", &["Content"]),
             // Style infrastructure (REQ-RES-02).
             ("Style", &["BasedOn", "TargetType"]),
             ("Setter", &["Property", "Value"]),
@@ -168,13 +182,21 @@ impl Catalog {
 }
 
 /// Resolves `root` against `catalog`, returning all diagnostics found.
+/// One page is one XAML namescope: `x:Name` values must be unique across
+/// it (MILESTONES §3 M1).
 pub fn resolve(root: &XamlElement, catalog: &Catalog) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    resolve_element(root, catalog, &mut diags);
+    let mut names = Vec::new();
+    resolve_element(root, catalog, &mut names, &mut diags);
     diags
 }
 
-fn resolve_element(el: &XamlElement, catalog: &Catalog, diags: &mut Vec<Diagnostic>) {
+fn resolve_element<'a>(
+    el: &'a XamlElement,
+    catalog: &Catalog,
+    names: &mut Vec<&'a str>,
+    diags: &mut Vec<Diagnostic>,
+) {
     let known_element = catalog.elements.contains_key(el.name.as_str());
     if !known_element {
         diags.push(Diagnostic::error(
@@ -186,15 +208,49 @@ fn resolve_element(el: &XamlElement, catalog: &Catalog, diags: &mut Vec<Diagnost
         // Attribute checks against an unknown element would only produce
         // cascading noise; still recurse into children for full coverage.
         for child in &el.children {
-            resolve_element(child, catalog, diags);
+            resolve_element(child, catalog, names, diags);
         }
         return;
     }
 
     for a in &el.attributes {
-        // `x:` directives and `xml:*` language attributes are not element
-        // properties; the dialect rules that consume them come later in M1.
-        if a.name.starts_with("x:") || a.name.starts_with("xml:") {
+        // `xml:*` language attributes are accepted silently (MILESTONES
+        // §3 M1); x: directives each get their own rule below.
+        if a.name.starts_with("xml:") {
+            continue;
+        }
+        if let Some(directive) = a.name.strip_prefix("x:") {
+            match directive {
+                // x:Key's uniqueness is the resource layer's concern;
+                // x:Uid is accepted, its substitution ships at M7.
+                "Key" | "Uid" => {}
+                "Name" => {
+                    if names.contains(&a.value.as_str()) {
+                        diags.push(Diagnostic::error(
+                            "WX0008",
+                            format!("x:Name \"{}\" is already used in this namescope", a.value),
+                            a.pos,
+                            a.value.len() as u32,
+                        ));
+                    } else {
+                        names.push(a.value.as_str());
+                    }
+                }
+                // N1 (PRD non-goals): no codegen; event wiring belongs to
+                // the Rust host.
+                "Class" => diags.push(Diagnostic::error(
+                    "WX0009",
+                    "x:Class is not supported in the PoC dialect (no codegen; N1)".to_string(),
+                    a.pos,
+                    a.name.len() as u32,
+                )),
+                other => diags.push(Diagnostic::error(
+                    "WX0010",
+                    format!("unknown x: directive `x:{other}`"),
+                    a.pos,
+                    a.name.len() as u32,
+                )),
+            }
             continue;
         }
         if a.name.contains('.') {
@@ -252,7 +308,7 @@ fn resolve_element(el: &XamlElement, catalog: &Catalog, diags: &mut Vec<Diagnost
             )
         {
             for child in &p.child_elements {
-                resolve_element(child, catalog, diags);
+                resolve_element(child, catalog, names, diags);
             }
             continue;
         }
@@ -266,12 +322,12 @@ fn resolve_element(el: &XamlElement, catalog: &Catalog, diags: &mut Vec<Diagnost
             p.name.len() as u32 + 1,
         ));
         for child in &p.child_elements {
-            resolve_element(child, catalog, diags);
+            resolve_element(child, catalog, names, diags);
         }
     }
 
     for child in &el.children {
-        resolve_element(child, catalog, diags);
+        resolve_element(child, catalog, names, diags);
     }
 }
 
@@ -298,6 +354,20 @@ fn check_markup_extension(
             format!(
                 "unknown markup extension `{ext}` on `{}` of `{}`",
                 a.name, el.name
+            ),
+            a.pos,
+            a.value.len() as u32,
+        ));
+    }
+    // PRD §5.2 [D]: {x:Null} is rejected where WinUI throws on a null
+    // value (the documented crash site is `Converter={x:Null}`) and
+    // accepted everywhere else.
+    if ext == "x:Null" && X_NULL_CRASH_PROPERTIES.contains(&a.name.as_str()) {
+        diags.push(Diagnostic::error(
+            "WX0011",
+            format!(
+                "x:Null is rejected on `{}` — WinUI throws on a null value here",
+                a.name
             ),
             a.pos,
             a.value.len() as u32,
@@ -943,8 +1013,9 @@ fn flatten_entries(layer: &DictionaryContents, into: &mut HashMap<String, Resour
 /// Parses one keyed resource element. The value forms for now:
 /// `SolidColorBrush` (Color attribute or `.Color` property element), a
 /// `Color` element (whose text the parser synthesizes into Content), a
-/// keyed `Style`, and the text-valued `CornerRadius`/`FontFamily`
-/// resources the token catalog ships.
+/// keyed `Style`, the text-valued `CornerRadius`/`FontFamily` resources
+/// the token catalog ships, and the x: intrinsic types whose text must
+/// coerce (MILESTONES §3 M1).
 fn parse_entry(el: &XamlElement) -> Result<ResourceValue, String> {
     let raw = match el.name.as_str() {
         "SolidColorBrush" => el
@@ -959,6 +1030,25 @@ fn parse_entry(el: &XamlElement) -> Result<ResourceValue, String> {
         "Color" => el
             .attr("Content")
             .ok_or_else(|| "Color element has no text value".to_string())?,
+        "x:Boolean" | "x:Double" | "x:String" => {
+            let text = el
+                .attr("Content")
+                .ok_or_else(|| format!("<{}> element has no text value", el.name))?;
+            match el.name.as_str() {
+                // XAML Booleans accept true/false in any case.
+                "x:Boolean"
+                    if !text.trim().eq_ignore_ascii_case("true")
+                        && !text.trim().eq_ignore_ascii_case("false") =>
+                {
+                    return Err(format!("`{text}` is not an x:Boolean value (true/false)"));
+                }
+                "x:Double" if text.trim().parse::<f64>().is_err() => {
+                    return Err(format!("`{text}` is not an x:Double value"));
+                }
+                _ => {}
+            }
+            return Ok(ResourceValue::Text(text.to_string()));
+        }
         "CornerRadius" | "FontFamily" => {
             let text = el
                 .attr("Content")
@@ -2478,5 +2568,129 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "WX1005");
         assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn duplicate_xname_errors_unique_passes() {
+        const DUP: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <TextBlock x:Name="title" Text="a"/>
+  <TextBlock x:Name="title" Text="b"/>
+</Page>"##;
+        let diags = resolve_str(DUP);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX0008");
+        assert_eq!(diags[0].severity, Severity::Error);
+        // Points at the second occurrence.
+        assert_eq!(diags[0].pos.unwrap().row, 4);
+
+        const UNIQUE: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <TextBlock x:Name="title" Text="a"/>
+  <TextBlock x:Name="body" Text="b"/>
+</Page>"##;
+        assert!(resolve_str(UNIQUE).is_empty());
+    }
+
+    #[test]
+    fn xuid_and_xml_attributes_are_accepted_silently() {
+        const DOC: &str = r#"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xml:lang="en-US"
+      x:Uid="PageUid">
+  <TextBlock x:Uid="TitleUid" xml:space="preserve" Text="a"/>
+</Page>"#;
+        assert!(resolve_str(DOC).is_empty());
+    }
+
+    #[test]
+    fn xclass_is_rejected() {
+        let diags = resolve_str(
+            r#"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      x:Class="App.MainPage">
+</Page>"#,
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX0009");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert!(diags[0].message.contains("N1"), "{diags:?}");
+        assert_eq!(diags[0].pos.unwrap().row, 3);
+    }
+
+    #[test]
+    fn unknown_x_directive_fails_loud() {
+        let diags = resolve_str(
+            r#"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      x:FieldModifier="public">
+</Page>"#,
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX0010");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn xnull_rejected_on_crash_site_accepted_elsewhere() {
+        // Converter is the documented WinUI crash site (PRD §5.2 [D]);
+        // the property is otherwise unknown to the catalog, so both the
+        // rejection and the unknown-property diagnostic appear.
+        let diags = resolve_str(
+            r#"<TextBlock xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Text="{x:Null}" Converter="{x:Null}"/>"#,
+        );
+        let mut codes: Vec<&str> = diags.iter().map(|d| d.code).collect();
+        codes.sort_unstable();
+        assert_eq!(codes, ["WX0003", "WX0011"]);
+        let rejection = diags.iter().find(|d| d.code == "WX0011").unwrap();
+        assert_eq!(rejection.severity, Severity::Error);
+        assert_eq!(rejection.pos.unwrap().row, 3);
+        // Elsewhere {x:Null} is accepted silently.
+        let diags = resolve_str(
+            r#"<TextBlock xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Text="{x:Null}"/>"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn intrinsic_types_coerce() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <x:Boolean x:Key="Flag">TRUE</x:Boolean>
+    <x:Double x:Key="Ratio">3.5</x:Double>
+    <x:String x:Key="Greeting">hello</x:String>
+  </Page.Resources>
+</Page>"##;
+        let (set, diags) = collect_with(DOC, &empty_resolver());
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            set.resolve("Flag", "0", Theme::Dark),
+            Some(&ResourceValue::Text("TRUE".to_string()))
+        );
+        assert_eq!(
+            set.resolve("Ratio", "0", Theme::Dark),
+            Some(&ResourceValue::Text("3.5".to_string()))
+        );
+        assert_eq!(
+            set.resolve("Greeting", "0", Theme::Dark),
+            Some(&ResourceValue::Text("hello".to_string()))
+        );
+
+        const BAD: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <x:Boolean x:Key="Bad1">yes</x:Boolean>
+    <x:Double x:Key="Bad2">wide</x:Double>
+  </Page.Resources>
+</Page>"##;
+        let (_, diags) = collect_with(BAD, &empty_resolver());
+        let mut codes: Vec<&str> = diags.iter().map(|d| d.code).collect();
+        codes.sort_unstable();
+        assert_eq!(codes, ["WX1002", "WX1002"]);
     }
 }

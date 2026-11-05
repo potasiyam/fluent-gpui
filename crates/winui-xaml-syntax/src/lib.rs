@@ -84,7 +84,12 @@ fn pos_of(doc: &roxmltree::Document, byte: usize) -> Pos {
 
 fn convert(doc: &roxmltree::Document, node: roxmltree::Node) -> Result<XamlElement, String> {
     let pos = pos_of(doc, node.range().start);
-    let name = node.tag_name().name().to_string();
+    // Elements from the XAML language namespace keep their `x:` spelling,
+    // like the layer's x:-prefixed attributes (x:Boolean and friends).
+    let name = match node.tag_name().namespace() {
+        Some(XAML_LANGUAGE_NS) => format!("x:{}", node.tag_name().name()),
+        _ => node.tag_name().name().to_string(),
+    };
 
     let mut attributes = Vec::new();
     for attr in node.attributes() {
@@ -255,5 +260,20 @@ mod tests {
     #[test]
     fn empty_document_is_an_error() {
         assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn xaml_language_ns_elements_keep_x_prefix() {
+        const DOC: &str = r#"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <x:String x:Key="S">hi</x:String>
+  </Page.Resources>
+</Page>"#;
+        let tree = parse(DOC).unwrap();
+        assert_eq!(tree.properties[0].name, "Page.Resources");
+        let entry = &tree.properties[0].child_elements[0];
+        assert_eq!(entry.name, "x:String");
+        assert_eq!(entry.attr("x:Key"), Some("S"));
     }
 }
