@@ -43,8 +43,10 @@ MILESTONES.md; do not build past the current milestone.
 Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
 (naming C-CASE/C-GETTER, errors C-GOOD-ERR, docs C-DOC). Project specifics:
 
-- Edition 2024. `cargo fmt`, `cargo clippy --all-targets`, and `cargo test`
-  all clean before every commit. No lint allowlists without a written reason.
+- Edition 2024. `cargo fmt`, `cargo clippy --all-targets --workspace`, and
+  `cargo test --workspace` all clean before every commit — the root package
+  is the default member, so plain `cargo test`/`clippy` skip the library
+  crates. No lint allowlists without a written reason.
 - Errors: `Result` with descriptive messages; no `unwrap`/`expect` in library
   code — `expect` only in `main`, tests, and startup. XAML failures become
   diagnostics (WX codes from M1), never panics and never silent fallbacks.
@@ -92,6 +94,12 @@ keeping — cite the rule ("WinUI defaults `{x:Bind}` to OneTime").
 - Verification habit: never state build/test/benchmark status without having
   run it in the current session. Perf budgets (PRD §13) ship benchmarks with
   the feature, not after.
+- Milestone gates (user rule, 2026-10-07): at the close of each milestone
+  step and at milestone exit, run the full gate — `cargo fmt`,
+  `cargo clippy --all-targets --workspace`, `cargo test --workspace`, and
+  for anything that draws a window, the auto-close render run plus a
+  screenshot — and record the evidence in the owning doc before starting
+  the next step.
 
 ## Commits
 
