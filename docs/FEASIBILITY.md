@@ -102,8 +102,8 @@ on auto-close runs, `cargo test` 2/2.
 > renders identically to the previous literal-hex version. Evidence:
 > `cargo test --workspace` 18/18, `POC_AUTOCLOSE_SECS=12` exit 0 with an
 > empty stderr, `m1-resources-themeresource.png`. Not yet from REQ-RES-01:
-> `MergedDictionaries`, dictionary `Source` files, and `{ThemeResource}`
-> re-resolution on theme switch (rides with the token/theme engine).
+> `{ThemeResource}` re-resolution on theme switch (rides with the
+> token/theme engine).
 
 > **Update (2026-10-07, M1 styles):** `Style`/`Setter`/`BasedOn` land in
 > the model (REQ-RES-02): styles are resource values — keyed, or implicit
@@ -122,6 +122,31 @@ on auto-close runs, `cargo test` 2/2.
 > embedded XAML (rides with the M2 control catalog) and WinUI's implicit
 > where-used scoping nuance — our implicit styles follow the normal
 > nearest-scope order, a documented approximation.
+
+> **Update (2026-11-05, M1 merged dictionaries + Source files):** the last
+> two REQ-RES-01 items land. `collect_resources` now consumes
+> `ResourceDictionary.MergedDictionaries` and the `Source` attribute —
+> including `Source` on theme dictionaries and inside merged files — with
+> lookup precedence per MS Learn (xaml-resource-dictionary): a dictionary's
+> own entries are checked before its merged dictionaries, and multiple
+> merged dictionaries are checked last-added first. `Source` files load
+> through a host-supplied `SourceResolver` trait, so the model layer stays
+> gpui-free and I/O-free; the PoC host resolves plain relative paths
+> against demo.xaml's directory. An unresolvable or unparsable `Source` is
+> a WX1005 error at the dictionary's position, as is a file whose root is
+> not a `ResourceDictionary`, a `Source`/inline-content combination, and a
+> merge cycle (cycle loads are also depth-capped at 32 so pathological
+> inputs can't overflow the stack). demo.xaml now keeps only
+> `<ResourceDictionary Source="demo-resources.xaml"/>` — its whole
+> dictionary moved to `assets/demo-resources.xaml` — and renders
+> pixel-identical to the previous screenshot. One coverage note: catalog
+> checks (WX0002/3) and `{StaticResource}` reference checks (WX1001) walk
+> the page tree only, so constructs inside a `Source` file are checked by
+> the resource collector (WX1002/1003/1005) but not yet by those two
+> passes. Evidence: `cargo test --workspace` 36/36 (9 merged/Source tests
+> new), `cargo clippy --all-targets --workspace` clean, `cargo fmt` clean,
+> `POC_AUTOCLOSE_SECS=6` and `POC_AUTOCLOSE_SECS=12` `cargo run` exit 0
+> with an empty app stderr, `m1-merged-dictionaries-source.png`.
 
 ## Friction found (goes into M1 backlog)
 

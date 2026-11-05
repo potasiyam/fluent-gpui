@@ -384,9 +384,18 @@ mod tests {
     use super::*;
     use winui_xaml_syntax::parse;
 
+    /// Test resolver: serves nothing — these tests use inline dictionaries.
+    struct NoSources;
+
+    impl winui_xaml_model::SourceResolver for NoSources {
+        fn resolve(&self, source: &str) -> Result<String, String> {
+            Err(format!("no such file `{source}`"))
+        }
+    }
+
     fn resources_from(src: &str) -> ResourceSet {
         let tree = parse(src).unwrap();
-        let (resources, diags) = winui_xaml_model::collect_resources(&tree);
+        let (resources, diags) = winui_xaml_model::collect_resources(&tree, &NoSources);
         assert!(diags.is_empty(), "{diags:?}");
         resources
     }

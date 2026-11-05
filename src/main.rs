@@ -15,7 +15,7 @@ use gpui::{
 };
 use winui_xaml_gpui::{HandlerFn, XamlContext, render_element};
 use winui_xaml_model::{
-    Catalog, Diagnostic, ResourceSet, Severity, Theme, check_resource_references,
+    Catalog, Diagnostic, ResourceSet, Severity, SourceResolver, Theme, check_resource_references,
     check_style_chains, collect_resources, render_diagnostics, resolve, resolve_styles,
 };
 use winui_xaml_syntax::{XamlElement, parse};
@@ -95,11 +95,31 @@ fn backdrop_from_xaml(tree: &XamlElement) -> WindowBackgroundAppearance {
     }
 }
 
-/// All load-time diagnostics for one parsed tree: resource collection,
-/// style-chain validation, catalog resolution, and resource-reference
-/// checks. Also returns the collected resources for rendering.
+/// Resolves ResourceDictionary `Source` values against demo.xaml's
+/// directory; the PoC's `Source` form is a plain relative path.
+struct DemoSourceResolver {
+    base: PathBuf,
+}
+
+impl SourceResolver for DemoSourceResolver {
+    fn resolve(&self, source: &str) -> Result<String, String> {
+        let path = self.base.join(source);
+        std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// All load-time diagnostics for one parsed tree: resource collection
+/// (including `Source` files next to demo.xaml), style-chain validation,
+/// catalog resolution, and resource-reference checks. Also returns the
+/// collected resources for rendering.
 fn startup_diagnostics(tree: &XamlElement, theme: Theme) -> (ResourceSet, Vec<Diagnostic>) {
-    let (resources, mut diags) = collect_resources(tree);
+    let resolver = DemoSourceResolver {
+        base: demo_xaml_path()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
+    };
+    let (resources, mut diags) = collect_resources(tree, &resolver);
     diags.extend(check_style_chains(&resources, &Catalog::poc_subset()));
     diags.extend(resolve(tree, &Catalog::poc_subset()));
     diags.extend(check_resource_references(tree, &resources, theme));

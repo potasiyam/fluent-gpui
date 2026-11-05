@@ -19,6 +19,7 @@
 //! | WX1002 | malformed resource entry (no key, unparsable color, unsupported type) |
 //! | WX1003 | unknown `ThemeDictionaries` key |
 //! | WX1004 | style error (TargetType mismatch or unknown, BasedOn cycle or not a Style) |
+//! | WX1005 | dictionary `Source` failed to resolve or parse |
 //!
 //! Resources (REQ-RES-01): [`collect_resources`] gathers `.Resources`
 //! dictionaries (plain and theme) into a [`ResourceSet`]; [`ResourceSet::resolve`]
@@ -26,8 +27,13 @@
 //! [`check_resource_references`] verifies every `{StaticResource}`/`{ThemeResource}`
 //! use resolves — an unresolvable `{StaticResource}` is an error, matching
 //! WinUI's parse exception. `MergedDictionaries` and dictionary `Source`
-//! files are later M1 work; WinUI's `"Default"` theme key is rejected
-//! because the vendored authoring rules ban it.
+//! files are consumed too: a dictionary's own entries are checked before
+//! its merged dictionaries, and multiple merged dictionaries are checked
+//! last-added first (MS Learn, xaml-resource-dictionary). `Source` files
+//! load through a host-supplied [`SourceResolver`], so the model stays
+//! gpui-free and I/O-free; an unresolvable or unparsable `Source` is
+//! WX1005 at the dictionary's position. WinUI's `"Default"` theme key is
+//! rejected because the vendored authoring rules ban it.
 //!
 //! Styles (REQ-RES-02): `Style` entries (keyed, or implicit keyed by
 //! TargetType) parse into [`StyleDef`]; [`style_setters`] flattens the
@@ -141,7 +147,7 @@ impl Catalog {
             ("Button", &["Click", "Content"][..]),
             // Resource infrastructure (REQ-RES-01); their values resolve
             // through `ResourceSet`, not the renderer.
-            ("ResourceDictionary", &[][..]),
+            ("ResourceDictionary", &["Source"][..]),
             ("SolidColorBrush", &["Color"]),
             // The parser maps a Color element's text to a synthesized
             // Content attribute, so that is the property to check.
@@ -235,7 +241,10 @@ fn resolve_element(el: &XamlElement, catalog: &Catalog, diags: &mut Vec<Diagnost
         if p.name == format!("{}.Resources", el.name)
             || matches!(
                 p.name.as_str(),
-                "ResourceDictionary.ThemeDictionaries" | "SolidColorBrush.Color" | "Style.Setters"
+                "ResourceDictionary.ThemeDictionaries"
+                    | "ResourceDictionary.MergedDictionaries"
+                    | "SolidColorBrush.Color"
+                    | "Style.Setters"
             )
         {
             for child in &p.child_elements {
@@ -398,11 +407,61 @@ pub struct ResourceSet {
 struct Scope {
     /// Render path of the owning element (`"0"` for the page root).
     owner: String,
+    /// The dictionary named by `<…Resources>` (implicit or explicit);
+    /// dictionaries merged into it hang off it.
+    dictionary: DictionaryContents,
+}
+
+/// One resource dictionary's contents: keyed entries, per-theme
+/// dictionaries, implicit styles, and the dictionaries merged into it
+/// through `MergedDictionaries`/`Source`, in declaration order. WinUI
+/// checks a dictionary's own keyed resources before its merged
+/// dictionaries, and multiple merged dictionaries in reverse declaration
+/// order (MS Learn, xaml-resource-dictionary).
+#[derive(Default)]
+struct DictionaryContents {
     entries: HashMap<String, ResourceValue>,
     /// Per-theme dictionaries from `<…ResourceDictionary.ThemeDictionaries>`.
     theme_entries: HashMap<Theme, HashMap<String, ResourceValue>>,
     /// Implicit styles keyed by TargetType (REQ-RES-02).
     implicit_styles: HashMap<String, StyleDef>,
+    /// Merged dictionaries, first added first; each may nest further.
+    merged: Vec<DictionaryContents>,
+}
+
+impl DictionaryContents {
+    /// Keyed lookup: own entries first, then merged dictionaries
+    /// last-added first. Theme-agnostic; the style-chain checks use it.
+    fn get(&self, key: &str) -> Option<&ResourceValue> {
+        self.entries
+            .get(key)
+            .or_else(|| self.merged.iter().rev().find_map(|m| m.get(key)))
+    }
+
+    fn implicit(&self, target_type: &str) -> Option<&StyleDef> {
+        self.implicit_styles.get(target_type).or_else(|| {
+            self.merged
+                .iter()
+                .rev()
+                .find_map(|m| m.implicit(target_type))
+        })
+    }
+
+    /// Keyed lookup including theme dictionaries: within each layer the
+    /// active theme's dictionary wins over plain entries, then merged
+    /// layers last-added first.
+    fn get_themed(&self, key: &str, theme: Theme) -> Option<&ResourceValue> {
+        self.theme_entries
+            .get(&theme)
+            .and_then(|m| m.get(key))
+            .or_else(|| self.entries.get(key))
+            .or_else(|| {
+                self.merged
+                    .iter()
+                    .rev()
+                    .find_map(|m| m.get_themed(key, theme))
+            })
+    }
 }
 
 /// Scopes owning `path`, nearest first.
@@ -423,10 +482,7 @@ impl ResourceSet {
     /// on theme switch re-runs this lookup (REQ-RES-01).
     pub fn resolve(&self, key: &str, path: &str, theme: Theme) -> Option<&ResourceValue> {
         for s in owning_scopes(self, path) {
-            if let Some(v) = s.theme_entries.get(&theme).and_then(|m| m.get(key)) {
-                return Some(v);
-            }
-            if let Some(v) = s.entries.get(key) {
+            if let Some(v) = s.dictionary.get_themed(key, theme) {
                 return Some(v);
             }
         }
@@ -438,7 +494,7 @@ impl ResourceSet {
     /// styles in the PoC subset.
     pub fn resolve_implicit_style(&self, target_type: &str, path: &str) -> Option<&StyleDef> {
         for s in owning_scopes(self, path) {
-            if let Some(style) = s.implicit_styles.get(target_type) {
+            if let Some(style) = s.dictionary.implicit(target_type) {
                 return Some(style);
             }
         }
@@ -472,26 +528,68 @@ pub fn resource_key<'a>(value: &'a str, extension: &str) -> Option<&'a str> {
     Some(key.split(',').next().unwrap_or(key))
 }
 
+/// Supplies the content for a ResourceDictionary `Source` attribute, so
+/// the model layer stays gpui-free and I/O-free: the host owns file access.
+pub trait SourceResolver {
+    /// Content of the file named by a `Source` value, or a message saying
+    /// why it could not be read.
+    fn resolve(&self, source: &str) -> Result<String, String>;
+}
+
+/// Cap on nested `Source` loads. Same-file merge cycles are caught by the
+/// load chain (`loading`); this bounds the recursion for everything else,
+/// so pathological inputs become a diagnostic instead of a stack overflow.
+const MAX_SOURCE_DEPTH: usize = 32;
+
 /// Collects every `.Resources` dictionary in the tree into a
-/// [`ResourceSet`], plus diagnostics for malformed entries (WX1002) and
-/// unknown theme-dictionary keys (WX1003).
-pub fn collect_resources(root: &XamlElement) -> (ResourceSet, Vec<Diagnostic>) {
+/// [`ResourceSet`], plus diagnostics for malformed entries (WX1002),
+/// unknown theme-dictionary keys (WX1003), and failed `Source` loads
+/// (WX1005). `Source` files load through `resolver`.
+pub fn collect_resources(
+    root: &XamlElement,
+    resolver: &dyn SourceResolver,
+) -> (ResourceSet, Vec<Diagnostic>) {
     let mut set = ResourceSet::default();
     let mut diags = Vec::new();
-    collect_scope(root, "0", &mut set, &mut diags);
+    let mut loading = Vec::new();
+    collect_scope(root, "0", resolver, &mut loading, 0, &mut set, &mut diags);
     (set, diags)
 }
 
 /// Walks rendered elements with the same index paths the renderer computes
 /// (`"0"`, `"0.1"`, …), gathering each element's `.Resources` dictionary.
-fn collect_scope(el: &XamlElement, path: &str, set: &mut ResourceSet, diags: &mut Vec<Diagnostic>) {
+fn collect_scope(
+    el: &XamlElement,
+    path: &str,
+    resolver: &dyn SourceResolver,
+    loading: &mut Vec<String>,
+    depth: usize,
+    set: &mut ResourceSet,
+    diags: &mut Vec<Diagnostic>,
+) {
     for p in &el.properties {
         if p.name == format!("{}.Resources", el.name) {
-            parse_dictionary(&p.child_elements, path, set, diags);
+            parse_dictionary(
+                &p.child_elements,
+                path,
+                resolver,
+                loading,
+                depth,
+                set,
+                diags,
+            );
         }
     }
     for (i, child) in el.children.iter().enumerate() {
-        collect_scope(child, &format!("{path}.{i}"), set, diags);
+        collect_scope(
+            child,
+            &format!("{path}.{i}"),
+            resolver,
+            loading,
+            depth,
+            set,
+            diags,
+        );
     }
 }
 
@@ -501,57 +599,173 @@ fn collect_scope(el: &XamlElement, path: &str, set: &mut ResourceSet, diags: &mu
 fn parse_dictionary(
     elements: &[XamlElement],
     owner: &str,
+    resolver: &dyn SourceResolver,
+    loading: &mut Vec<String>,
+    depth: usize,
     set: &mut ResourceSet,
     diags: &mut Vec<Diagnostic>,
 ) {
-    let mut scope = Scope {
-        owner: owner.to_string(),
-        entries: HashMap::new(),
-        theme_entries: HashMap::new(),
-        implicit_styles: HashMap::new(),
-    };
-    parse_dictionary_entries(elements, &mut scope, diags);
-    set.scopes.push(scope);
-}
-
-fn parse_dictionary_entries(
-    elements: &[XamlElement],
-    scope: &mut Scope,
-    diags: &mut Vec<Diagnostic>,
-) {
+    let mut dictionary = DictionaryContents::default();
     for e in elements {
         if e.name == "ResourceDictionary" {
-            for p in &e.properties {
-                if p.name == "ResourceDictionary.ThemeDictionaries" {
-                    parse_theme_dictionaries(&p.child_elements, scope, diags);
-                } else {
-                    // MergedDictionaries and friends are later M1 work.
-                    diags.push(Diagnostic::warning(
-                        "WX0004",
-                        format!(
-                            "property element `<{}>` is not implemented in the PoC subset",
-                            p.name
-                        ),
-                        p.pos,
-                        p.name.len() as u32 + 1,
-                    ));
-                }
-            }
-            insert_entries(
-                &e.children,
-                &mut scope.entries,
-                Some(&mut scope.implicit_styles),
-                diags,
-            );
+            // The explicit dictionary IS the owning dictionary.
+            load_dictionary(e, &mut dictionary, resolver, loading, depth, diags);
         } else {
             insert_entries(
                 std::slice::from_ref(e),
-                &mut scope.entries,
-                Some(&mut scope.implicit_styles),
+                &mut dictionary.entries,
+                Some(&mut dictionary.implicit_styles),
                 diags,
             );
         }
     }
+    set.scopes.push(Scope {
+        owner: owner.to_string(),
+        dictionary,
+    });
+}
+
+/// Fills `into` with one `<ResourceDictionary>` element's contents: inline
+/// entries and theme dictionaries, or — with a `Source` attribute —
+/// everything the named file provides. Merged children become layers of
+/// `into`, in declaration order.
+fn load_dictionary(
+    el: &XamlElement,
+    into: &mut DictionaryContents,
+    resolver: &dyn SourceResolver,
+    loading: &mut Vec<String>,
+    depth: usize,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if let Some(source) = el.attr("Source") {
+        let source = source.trim();
+        if !el.children.is_empty() || !el.properties.is_empty() {
+            diags.push(Diagnostic::error(
+                "WX1005",
+                "ResourceDictionary combines Source with inline entries; \
+                 a Source'd dictionary takes its content only from the file"
+                    .to_string(),
+                el.pos,
+                el.name.len() as u32 + 1,
+            ));
+            return;
+        }
+        load_dictionary_source(source, into, resolver, loading, depth, el.pos, diags);
+        return;
+    }
+    for p in &el.properties {
+        match p.name.as_str() {
+            "ResourceDictionary.ThemeDictionaries" => {
+                parse_theme_dictionaries(&p.child_elements, into, resolver, loading, depth, diags);
+            }
+            "ResourceDictionary.MergedDictionaries" => {
+                for merged in &p.child_elements {
+                    let mut layer = DictionaryContents::default();
+                    if merged.name == "ResourceDictionary" {
+                        load_dictionary(merged, &mut layer, resolver, loading, depth, diags);
+                    } else {
+                        // Not a dictionary: keep the entry handling's
+                        // diagnostics (no x:Key, unsupported type).
+                        insert_entries(
+                            std::slice::from_ref(merged),
+                            &mut layer.entries,
+                            Some(&mut layer.implicit_styles),
+                            diags,
+                        );
+                    }
+                    into.merged.push(layer);
+                }
+            }
+            _ => diags.push(Diagnostic::warning(
+                "WX0004",
+                format!(
+                    "property element `<{}>` is not implemented in the PoC subset",
+                    p.name
+                ),
+                p.pos,
+                p.name.len() as u32 + 1,
+            )),
+        }
+    }
+    insert_entries(
+        &el.children,
+        &mut into.entries,
+        Some(&mut into.implicit_styles),
+        diags,
+    );
+}
+
+/// Loads one `Source` value through `resolver` and merges the file's
+/// dictionary into `into`. An unresolvable or unparsable file is a WX1005
+/// error at the dictionary element's `pos` — WinUI throws a parse
+/// exception for a missing merged dictionary.
+fn load_dictionary_source(
+    source: &str,
+    into: &mut DictionaryContents,
+    resolver: &dyn SourceResolver,
+    loading: &mut Vec<String>,
+    depth: usize,
+    pos: Pos,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let underline = source.len() as u32 + 1;
+    if loading.iter().any(|s| s == source) {
+        diags.push(Diagnostic::error(
+            "WX1005",
+            format!("merged dictionary cycle involving Source `{source}`"),
+            pos,
+            underline,
+        ));
+        return;
+    }
+    if depth >= MAX_SOURCE_DEPTH {
+        diags.push(Diagnostic::error(
+            "WX1005",
+            format!("merged dictionaries nested more than {MAX_SOURCE_DEPTH} deep"),
+            pos,
+            underline,
+        ));
+        return;
+    }
+    let content = match resolver.resolve(source) {
+        Ok(content) => content,
+        Err(reason) => {
+            diags.push(Diagnostic::error(
+                "WX1005",
+                format!("Source `{source}` could not be loaded: {reason}"),
+                pos,
+                underline,
+            ));
+            return;
+        }
+    };
+    let file = match winui_xaml_syntax::parse(&content) {
+        Ok(file) => file,
+        Err(reason) => {
+            diags.push(Diagnostic::error(
+                "WX1005",
+                format!("Source `{source}` is not parsable XAML: {reason}"),
+                pos,
+                underline,
+            ));
+            return;
+        }
+    };
+    if file.name != "ResourceDictionary" {
+        diags.push(Diagnostic::error(
+            "WX1005",
+            format!(
+                "Source `{source}` root element is `{}`, not ResourceDictionary",
+                file.name
+            ),
+            pos,
+            underline,
+        ));
+        return;
+    }
+    loading.push(source.to_string());
+    load_dictionary(&file, into, resolver, loading, depth + 1, diags);
+    loading.pop();
 }
 
 fn insert_entries(
@@ -627,7 +841,10 @@ fn insert_implicit_style(
 
 fn parse_theme_dictionaries(
     elements: &[XamlElement],
-    scope: &mut Scope,
+    into: &mut DictionaryContents,
+    resolver: &dyn SourceResolver,
+    loading: &mut Vec<String>,
+    depth: usize,
     diags: &mut Vec<Diagnostic>,
 ) {
     for dict in elements {
@@ -654,8 +871,30 @@ fn parse_theme_dictionaries(
                 continue;
             }
         };
-        let entries = scope.theme_entries.entry(theme).or_default();
-        insert_entries(&dict.children, entries, None, diags);
+        let entries = into.theme_entries.entry(theme).or_default();
+        if dict.attr("Source").is_some() {
+            // WinUI documents theme dictionaries from files (MS Learn,
+            // xaml-resource-dictionary). The dictionary machinery handles
+            // the load; its lookup precedence flattens into the theme's
+            // entries.
+            let mut layer = DictionaryContents::default();
+            load_dictionary(dict, &mut layer, resolver, loading, depth, diags);
+            flatten_entries(&layer, entries);
+        } else {
+            insert_entries(&dict.children, entries, None, diags);
+        }
+    }
+}
+
+/// Flattens a dictionary into a flat entry map, merged layers first and
+/// own entries last, so each later insert carries WinUI's lookup
+/// precedence (own entries over merged, last-added merged over earlier).
+fn flatten_entries(layer: &DictionaryContents, into: &mut HashMap<String, ResourceValue>) {
+    for merged in &layer.merged {
+        flatten_entries(merged, into);
+    }
+    for (key, value) in &layer.entries {
+        into.insert(key.clone(), value.clone());
     }
 }
 
@@ -910,22 +1149,33 @@ fn apply_styles(
 /// TargetType-compatible, and cycle-free (all WX1004-class, plus WX0003
 /// for unknown setter properties and WX1001 for missing BasedOn keys).
 pub fn check_style_chains(resources: &ResourceSet, catalog: &Catalog) -> Vec<Diagnostic> {
-    let mut diags = Vec::new();
-    for scope in &resources.scopes {
-        for (key, value) in &scope.entries {
+    fn check_dictionary(
+        dictionary: &DictionaryContents,
+        scope: &Scope,
+        catalog: &Catalog,
+        diags: &mut Vec<Diagnostic>,
+    ) {
+        for (key, value) in &dictionary.entries {
             if let ResourceValue::Style(style) = value {
-                check_one_style(&format!("`{key}`"), style, scope, catalog, &mut diags);
+                check_one_style(&format!("`{key}`"), style, scope, catalog, diags);
             }
         }
-        for (target, style) in &scope.implicit_styles {
+        for (target, style) in &dictionary.implicit_styles {
             check_one_style(
                 &format!("(implicit `{target}`)"),
                 style,
                 scope,
                 catalog,
-                &mut diags,
+                diags,
             );
         }
+        for merged in &dictionary.merged {
+            check_dictionary(merged, scope, catalog, diags);
+        }
+    }
+    let mut diags = Vec::new();
+    for scope in &resources.scopes {
+        check_dictionary(&scope.dictionary, scope, catalog, &mut diags);
     }
     diags
 }
@@ -1014,7 +1264,7 @@ fn check_one_style(
             ));
             break;
         }
-        match scope.entries.get(key) {
+        match scope.dictionary.get(key) {
             Some(ResourceValue::Style(base)) => {
                 if let (Some(a), Some(b)) = (&current.target_type, &base.target_type)
                     && a != b
@@ -1204,7 +1454,7 @@ mod tests {
     #[test]
     fn resources_resolve_by_scope_and_theme() {
         let tree = parse(RESOURCES_DOC).unwrap();
-        let (set, diags) = collect_resources(&tree);
+        let (set, diags) = collect_resources(&tree, &empty_resolver());
         assert!(diags.is_empty(), "{diags:?}");
 
         // Theme dictionaries answer for the active theme, plain entries
@@ -1255,7 +1505,7 @@ mod tests {
   </StackPanel>
 </Page>"##;
         let tree = parse(DOC).unwrap();
-        let (set, diags) = collect_resources(&tree);
+        let (set, diags) = collect_resources(&tree, &empty_resolver());
         assert!(diags.is_empty(), "{diags:?}");
         // The Border (render path "0.0.0") is shadowed by its own scope.
         assert_eq!(
@@ -1279,10 +1529,324 @@ mod tests {
         );
     }
 
+    /// Test resolver: serves `Source` values from a fixed map; anything
+    /// else is an unresolvable file.
+    struct MapResolver {
+        files: HashMap<String, String>,
+    }
+
+    impl SourceResolver for MapResolver {
+        fn resolve(&self, source: &str) -> Result<String, String> {
+            self.files
+                .get(source)
+                .cloned()
+                .ok_or_else(|| format!("no such file `{source}`"))
+        }
+    }
+
+    fn resolver(files: &[(&str, &str)]) -> MapResolver {
+        MapResolver {
+            files: files
+                .iter()
+                .map(|(name, content)| (name.to_string(), content.to_string()))
+                .collect(),
+        }
+    }
+
+    /// Serves nothing: for the tests that use inline dictionaries only.
+    fn empty_resolver() -> MapResolver {
+        MapResolver {
+            files: HashMap::new(),
+        }
+    }
+
+    fn collect_with(src: &str, resolver: &dyn SourceResolver) -> (ResourceSet, Vec<Diagnostic>) {
+        collect_resources(&parse(src).unwrap(), resolver)
+    }
+
+    /// Pulls the color out of a lookup result for assertions.
+    fn color(value: Option<&ResourceValue>) -> Option<Rgba> {
+        match value {
+            Some(ResourceValue::Color(c)) => Some(*c),
+            _ => None,
+        }
+    }
+
+    const MERGED_FIRST: &str = r##"<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <SolidColorBrush x:Key="Shared" Color="#FF111111"/>
+  <SolidColorBrush x:Key="OnlyFirst" Color="#FF111111"/>
+</ResourceDictionary>"##;
+
+    const MERGED_SECOND: &str = r##"<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <SolidColorBrush x:Key="Shared" Color="#FF222222"/>
+  <SolidColorBrush x:Key="OnlySecond" Color="#FF222222"/>
+</ResourceDictionary>"##;
+
+    fn merged_page(extra_entries: &str) -> String {
+        format!(
+            r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="first.xaml"/>
+        <ResourceDictionary Source="second.xaml"/>
+      </ResourceDictionary.MergedDictionaries>
+      {extra_entries}
+    </ResourceDictionary>
+  </Page.Resources>
+</Page>"##
+        )
+    }
+
+    #[test]
+    fn later_merged_dictionary_overrides_earlier_ones() {
+        let (set, diags) = collect_with(
+            &merged_page(""),
+            &resolver(&[("first.xaml", MERGED_FIRST), ("second.xaml", MERGED_SECOND)]),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        // Merged dictionaries are checked in reverse declaration order, so
+        // the last-added dictionary answers for a shared key (MS Learn,
+        // xaml-resource-dictionary).
+        assert_eq!(
+            color(set.resolve("Shared", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x22,
+                g: 0x22,
+                b: 0x22
+            })
+        );
+        // Both merged dictionaries' keys are visible in the owning scope,
+        // including from an element the scope owns.
+        assert_eq!(
+            color(set.resolve("OnlyFirst", "0.0.0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x11,
+                g: 0x11,
+                b: 0x11
+            })
+        );
+        assert_eq!(
+            color(set.resolve("OnlySecond", "0.0.0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x22,
+                g: 0x22,
+                b: 0x22
+            })
+        );
+    }
+
+    #[test]
+    fn owning_dictionary_entries_win_over_merged() {
+        // MS Learn, xaml-resource-dictionary: the primary dictionary's own
+        // resources are always checked before the merged dictionaries.
+        let (set, diags) = collect_with(
+            &merged_page(r##"<SolidColorBrush x:Key="Shared" Color="#FF333333"/>"##),
+            &resolver(&[("first.xaml", MERGED_FIRST), ("second.xaml", MERGED_SECOND)]),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            color(set.resolve("Shared", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x33,
+                g: 0x33,
+                b: 0x33
+            })
+        );
+    }
+
+    #[test]
+    fn source_merges_keys_from_a_second_file() {
+        // demo.xaml's shape: the owning dictionary is a file.
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary Source="dict.xaml"/>
+  </Page.Resources>
+  <TextBlock Text="a" Foreground="{StaticResource FromFile}"/>
+</Page>"##;
+        const FILE: &str = r##"<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <SolidColorBrush x:Key="FromFile" Color="#FF4EC9B0"/>
+</ResourceDictionary>"##;
+        let tree = parse(DOC).unwrap();
+        let (set, diags) = collect_resources(&tree, &resolver(&[("dict.xaml", FILE)]));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            color(set.resolve("FromFile", "0.0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x4E,
+                g: 0xC9,
+                b: 0xB0
+            })
+        );
+        // The page's own references to file-provided keys resolve.
+        let diags = check_resource_references(&tree, &set, Theme::Dark);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn missing_source_is_an_error_at_the_dictionary_position() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary Source="nope.xaml"/>
+  </Page.Resources>
+</Page>"##;
+        let (set, diags) = collect_with(DOC, &resolver(&[]));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1005");
+        assert_eq!(diags[0].severity, Severity::Error);
+        // Points at the dictionary element, not the Source attribute.
+        assert_eq!(diags[0].pos, Some(Pos { row: 4, col: 5 }));
+        assert_eq!(color(set.resolve("Shared", "0", Theme::Dark)), None);
+    }
+
+    #[test]
+    fn unparsable_source_is_an_error() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary Source="bad.xaml"/>
+  </Page.Resources>
+</Page>"##;
+        let (_, diags) = collect_with(DOC, &resolver(&[("bad.xaml", "<ResourceDictionary")]));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1005");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(diags[0].pos.unwrap().row, 4);
+    }
+
+    #[test]
+    fn source_root_must_be_a_resource_dictionary() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary Source="page.xaml"/>
+  </Page.Resources>
+</Page>"##;
+        let (_, diags) = collect_with(
+            DOC,
+            &resolver(&[(
+                "page.xaml",
+                r#"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"/>"#,
+            )]),
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1005");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn merged_dictionary_source_cycle_is_an_error() {
+        // first.xaml merges itself.
+        const A: &str = r##"<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ResourceDictionary.MergedDictionaries>
+    <ResourceDictionary Source="first.xaml"/>
+  </ResourceDictionary.MergedDictionaries>
+  <SolidColorBrush x:Key="A" Color="#FF111111"/>
+</ResourceDictionary>"##;
+        let (set, diags) = collect_with(
+            &merged_page(""),
+            &resolver(&[("first.xaml", A), ("second.xaml", MERGED_SECOND)]),
+        );
+        // The cycle is one error; the other merged dictionary still loads.
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1005");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(
+            color(set.resolve("Shared", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x22,
+                g: 0x22,
+                b: 0x22
+            })
+        );
+        // The cycle refuses only the self-referential re-load; the
+        // dictionary's own entries still collect.
+        assert_eq!(
+            color(set.resolve("A", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x11,
+                g: 0x11,
+                b: 0x11
+            })
+        );
+    }
+
+    #[test]
+    fn source_combined_with_inline_entries_is_an_error() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary Source="dict.xaml">
+      <SolidColorBrush x:Key="Inline" Color="#FF000000"/>
+    </ResourceDictionary>
+  </Page.Resources>
+</Page>"##;
+        let (_, diags) = collect_with(DOC, &resolver(&[("dict.xaml", MERGED_SECOND)]));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1005");
+        assert_eq!(diags[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn theme_dictionaries_load_from_source() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light" Source="first.xaml"/>
+        <ResourceDictionary x:Key="Dark" Source="second.xaml"/>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Page.Resources>
+</Page>"##;
+        let (set, diags) = collect_with(
+            DOC,
+            &resolver(&[("first.xaml", MERGED_FIRST), ("second.xaml", MERGED_SECOND)]),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            color(set.resolve("Shared", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x22,
+                g: 0x22,
+                b: 0x22
+            })
+        );
+        assert_eq!(
+            color(set.resolve("Shared", "0", Theme::Light)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x11,
+                g: 0x11,
+                b: 0x11
+            })
+        );
+    }
+
     #[test]
     fn resource_references_are_checked() {
         let tree = parse(RESOURCES_DOC).unwrap();
-        let (set, _) = collect_resources(&tree);
+        let (set, _) = collect_resources(&tree, &empty_resolver());
         let diags = check_resource_references(&tree, &set, Theme::Dark);
         assert!(diags.is_empty(), "{diags:?}");
 
@@ -1321,7 +1885,7 @@ mod tests {
   </Page.Resources>
 </Page>"##;
         let tree = parse(DOC).unwrap();
-        let (set, diags) = collect_resources(&tree);
+        let (set, diags) = collect_resources(&tree, &empty_resolver());
         // WX1003 for the banned "Default" theme key and WX1002 for the
         // bad color. `Good` still parses (the parser synthesizes its text
         // into Content); the empty keyed Style `S` parses as a style —
@@ -1418,7 +1982,7 @@ mod tests {
     #[test]
     fn styles_resolve_and_apply() {
         let tree = parse(STYLES_DOC).unwrap();
-        let (set, diags) = collect_resources(&tree);
+        let (set, diags) = collect_resources(&tree, &empty_resolver());
         assert!(diags.is_empty(), "{diags:?}");
         assert!(check_style_chains(&set, &Catalog::poc_subset()).is_empty());
 
@@ -1464,7 +2028,7 @@ mod tests {
   </StackPanel>
 </Page>"##;
         let tree = parse(DOC).unwrap();
-        let (set, _) = collect_resources(&tree);
+        let (set, _) = collect_resources(&tree, &empty_resolver());
         let resolved = resolve_styles(&tree, &set, Theme::Dark);
         // First TextBlock: the local Foreground wins over the setter, and
         // FontSize comes from the derived style (16, not the base's 12).
@@ -1492,7 +2056,7 @@ mod tests {
   </Page.Resources>
 </Page>"##;
         let tree = parse(DOC).unwrap();
-        let (set, collect_diags) = collect_resources(&tree);
+        let (set, collect_diags) = collect_resources(&tree, &empty_resolver());
         assert!(collect_diags.is_empty(), "{collect_diags:?}");
         let diags = check_style_chains(&set, &Catalog::poc_subset());
         // A and B both detect the cycle, C targets an unknown element, D
@@ -1513,7 +2077,7 @@ mod tests {
   <Button Style="{StaticResource T}" Content="b"/>
 </Page>"##;
         let tree = parse(DOC).unwrap();
-        let (set, _) = collect_resources(&tree);
+        let (set, _) = collect_resources(&tree, &empty_resolver());
         let diags = check_resource_references(&tree, &set, Theme::Dark);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "WX1004");
@@ -1537,7 +2101,7 @@ mod tests {
   </Page.Resources>
 </Page>"##;
         let tree = parse(DOC).unwrap();
-        let (set, diags) = collect_resources(&tree);
+        let (set, diags) = collect_resources(&tree, &empty_resolver());
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "WX1002");
         assert!(set.resolve_implicit_style("TextBlock", "0").is_none());
