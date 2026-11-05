@@ -269,7 +269,7 @@ re-examined when that milestone actually starts.
 | Their implementation | Our item | M | Notes we inherit |
 |---|---|---|---|
 | Mica via `DWMWA_SYSTEMBACKDROP_TYPE`, call-and-probe with Win10 fallback | REQ-MAT-01/02 | M4 | call-and-probe (attempt → verify → fall back) is the concrete shape for the REQ-MAT-02 fallback matrix |
-| Accent ramp from `UISettings.GetColorValue`; their fill convention: AccentDark1-based (light) / AccentLight2-based (dark) | REQ-TOK-01 | M1 | candidate idea: read the user's live accent instead of a hardcoded one; their fill convention is unverified against the vendored catalog — evaluate at M1 [Q — anecdotal] |
+| Accent ramp from `UISettings.GetColorValue`; their fill convention: AccentDark1-based (light) / AccentLight2-based (dark) | REQ-TOK-01 | M1 | candidate idea: read the user's live accent instead of a hardcoded one. Evaluated at M1 (2026-11-05): their fill convention matches the official Common_themeresources_any.xaml exactly (Light fills are AccentDark1-based, Dark fills AccentLight2-based); static catalog values ship, live OS reading stays a candidate rider for M2 [V — convention verified; decision in FEASIBILITY] |
 | Theme-role mapping from `Common_themeresources_any.xaml` | REQ-TOK-01 | M1 | corroborates the vendored brush catalog as the token source |
 | Custom titlebar: drag region, window-control areas, caption hover states, red close fill | §10 TitleBar | M2 | caption hover incl. red close is the Win11 convention; maps to window-control-area hit regions |
 | Segoe Fluent Icons glyphs, Segoe MDL2 fallback on Win10 | REQ-TOK-04 | M2 | Windows-native fallback chain before any bundled font |
@@ -291,8 +291,10 @@ product-specific.
 
 ### 7.3 Possible sequencing signals (non-binding — revisit when the milestone starts)
 
-- M1: evaluate live-from-OS accent ramp vs. static catalog tokens (PRD
-  REQ-TOK-01 notes this as an M1 evaluation).
+- M1: evaluated (2026-11-05): static catalog tokens ship; the anecdotal
+  fill convention verified against the official theme resource file, and
+  live-from-OS accent/SystemColor reading is a candidate M2 rider (PRD
+  REQ-TOK-01; outcome in FEASIBILITY).
 - M2: evaluate Segoe MDL2 as a pre-Win11 glyph fallback before bundling a
   font (PRD REQ-TOK-04 notes this as an M2 evaluation).
 - M6: if no better signal exists by then, open with the overlay/floating

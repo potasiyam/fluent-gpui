@@ -208,3 +208,51 @@ handling for `Visibility="Collapsed"`, `Opacity`, `Width`/`Height` and
 plan (Grid, resources, styles, two-way binding, control set) is layered
 architecture, not new feasibility questions — the two genuinely uncertain
 mechanics (runtime trees, event/state loop) are proven.
+
+> **Update (2026-11-05, M1 token catalog):** the Fluent 2 token set ships
+> as embedded XAML (`include_str!` of
+> `crates/winui-xaml-model/assets/fluent-tokens.xaml`) merged ahead of app
+> resources through the new `ResourceSet::merge_app_dictionary` — lookup
+> now follows WinUI's element → page → app order, so page and app
+> definitions override tokens. Brush values are WinUI's
+> `Common_themeresources_any.xaml` (fetched 2026-11-05); that file keys
+> its dark values "Default", which the vendored rules ban, so they ship
+> re-keyed "Dark". All five vendored families land (text, control fill,
+> stroke, surface/layer, accent — 58 brushes plus the SystemAccentColor
+> ramp as `Color` resources); the Acrylic family rides with the materials
+> milestone (flyouts/menus, M6). HighContrast maps every catalog key onto
+> the `SystemColor*` pairing exactly as WinUI's own HighContrast
+> dictionary does, ships the `SystemColor*Brush` family, and carries no
+> opacity; because the PoC reads no live OS colors, the `SystemColor*`
+> and `SystemAccentColor` defaults are the classic palette (Uno's
+> `SystemResources.xaml` mirror of the native placeholders). Accent fill
+> secondary/tertiary bake the official Opacity 0.9/0.8 into the color
+> alpha. REQ-TOK-02 lands as eight keyed ramp styles (Caption 12, Body 14,
+> BodyStrong 14 SemiBold, BodyLarge 18, Subtitle 20, Title 28, TitleLarge
+> 40, Display 68); their Foreground setter stands in for TextBlock's
+> platform default style until the M2 control catalog. REQ-TOK-03 ships
+> `ControlCornerRadius`=4 / `OverlayCornerRadius`=8 as `CornerRadius`
+> resources (a new `ResourceValue::Text` form) and the renderer now
+> resolves `CornerRadius` through them; the 4px spacing grid is an
+> authoring rule, applied to demo.xaml (spacing 14 → 16). REQ-TOK-04's
+> `SymbolThemeFontFamily` indirection ships; its consumer (`FontIcon`)
+> is M2. demo.xaml is restyled onto token keys (card, strokes, text,
+> accent via `AccentTextFillColorPrimaryBrush`) and renders themed in
+> both modes. The window surface itself is not token-driven yet — the
+> host paints only its opaque fallback, so in the Light capture the dark
+> Mica surface sits behind light-themed brushes (the `Window` element
+> owns that in M2). **Accent evaluation (MILESTONES §7.3, outcome):**
+> static catalog values ship for M1. The anecdotal app's fill convention
+> (AccentDark1-based in Light, AccentLight2-based in Dark) is verified
+> against the official `Common_themeresources_any.xaml` — it matches
+> exactly, so it is no longer unverified. Reading the live accent from
+> `UISettings.GetColorValue` stays a candidate rider for the M2 control
+> wave, when a control first consumes `AccentFillColorDefaultBrush`; a
+> live reader must also cover the `SystemColor*` set for real
+> HighContrast. Evidence: `cargo test --workspace` 45/45 (token brushes
+> per theme, HC SystemColor pairs, ramp sizes, corner/font tokens,
+> page-over-tokens precedence, theme-name parsing), `cargo clippy
+> --all-targets --workspace` clean, `cargo fmt` clean,
+> `POC_AUTOCLOSE_SECS=6` (default Dark) and `POC_THEME=Light|Dark
+> POC_AUTOCLOSE_SECS=12` runs all exit 0 with an empty app stderr,
+> `m1-token-catalog-dark.png`, `m1-token-catalog-light.png`.

@@ -150,8 +150,11 @@ impl Catalog {
             ("ResourceDictionary", &["Source"][..]),
             ("SolidColorBrush", &["Color"]),
             // The parser maps a Color element's text to a synthesized
-            // Content attribute, so that is the property to check.
+            // Content attribute, so that is the property to check. The
+            // text-valued token resources share that shape.
             ("Color", &["Content"]),
+            ("CornerRadius", &["Content"]),
+            ("FontFamily", &["Content"]),
             // Style infrastructure (REQ-RES-02).
             ("Style", &["BasedOn", "TargetType"]),
             ("Setter", &["Property", "Value"]),
@@ -364,11 +367,13 @@ pub fn parse_color(value: &str) -> Option<Rgba> {
     }
 }
 
-/// The value a resource key maps to: a color or a style (REQ-RES-01/02).
+/// The value a resource key maps to: a color, a style, or a text value
+/// such as WinUI's `CornerRadius`/`FontFamily` resources (REQ-RES-01/02).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceValue {
     Color(Rgba),
     Style(StyleDef),
+    Text(String),
 }
 
 /// One `Setter` inside a `Style`: the target property name and its raw
@@ -396,12 +401,15 @@ pub struct StyleDef {
 }
 
 /// All resource scopes collected from one page. Element-level `.Resources`
-/// dictionaries are keyed by the element's render path; lookup prefers the
-/// nearest scope (WinUI element → page → app order — app resources do not
-/// exist yet).
+/// dictionaries are keyed by the element's render path; lookup follows
+/// WinUI's element → page → app order, with app-level dictionaries
+/// merged through [`ResourceSet::merge_app_dictionary`] consulted last.
 #[derive(Default)]
 pub struct ResourceSet {
     scopes: Vec<Scope>,
+    /// App-level default dictionary (the embedded Fluent token catalog);
+    /// in scope for every element, checked after all element scopes.
+    defaults: Option<DictionaryContents>,
 }
 
 struct Scope {
@@ -486,7 +494,40 @@ impl ResourceSet {
                 return Some(v);
             }
         }
-        None
+        self.defaults
+            .as_ref()
+            .and_then(|d| d.get_themed(key, theme))
+    }
+
+    /// Merges one app-level default dictionary, consulted after every
+    /// element scope (WinUI's element → page → app lookup order). The
+    /// root must be a `ResourceDictionary` element (WX1005 error
+    /// otherwise); `ThemeDictionaries`, `MergedDictionaries`, and
+    /// `Source` all work exactly as in page scopes. Intended for the
+    /// embedded Fluent token catalog.
+    pub fn merge_app_dictionary(
+        &mut self,
+        root: &XamlElement,
+        resolver: &dyn SourceResolver,
+    ) -> Vec<Diagnostic> {
+        let mut diags = Vec::new();
+        if root.name != "ResourceDictionary" {
+            diags.push(Diagnostic::error(
+                "WX1005",
+                format!(
+                    "app dictionary root element is `{}`, not ResourceDictionary",
+                    root.name
+                ),
+                root.pos,
+                root.name.len() as u32 + 1,
+            ));
+            return diags;
+        }
+        let mut dictionary = DictionaryContents::default();
+        let mut loading = Vec::new();
+        load_dictionary(root, &mut dictionary, resolver, &mut loading, 0, &mut diags);
+        self.defaults = Some(dictionary);
+        diags
     }
 
     /// The implicit style for `target_type` at render `path` — nearest
@@ -498,7 +539,7 @@ impl ResourceSet {
                 return Some(style);
             }
         }
-        None
+        self.defaults.as_ref().and_then(|d| d.implicit(target_type))
     }
 }
 
@@ -900,8 +941,9 @@ fn flatten_entries(layer: &DictionaryContents, into: &mut HashMap<String, Resour
 
 /// Parses one keyed resource element. The value forms for now:
 /// `SolidColorBrush` (Color attribute or `.Color` property element), a
-/// `Color` element (whose text the parser synthesizes into Content), and
-/// a keyed `Style`.
+/// `Color` element (whose text the parser synthesizes into Content), a
+/// keyed `Style`, and the text-valued `CornerRadius`/`FontFamily`
+/// resources the token catalog ships.
 fn parse_entry(el: &XamlElement) -> Result<ResourceValue, String> {
     let raw = match el.name.as_str() {
         "SolidColorBrush" => el
@@ -916,6 +958,17 @@ fn parse_entry(el: &XamlElement) -> Result<ResourceValue, String> {
         "Color" => el
             .attr("Content")
             .ok_or_else(|| "Color element has no text value".to_string())?,
+        "CornerRadius" | "FontFamily" => {
+            let text = el
+                .attr("Content")
+                .ok_or_else(|| format!("<{}> element has no text value", el.name))?;
+            if el.name == "CornerRadius" {
+                text.trim()
+                    .parse::<f32>()
+                    .map_err(|_| format!("`{text}` is not a uniform CornerRadius number"))?;
+            }
+            return Ok(ResourceValue::Text(text.to_string()));
+        }
         "Style" => return parse_style(el).map(ResourceValue::Style),
         other => {
             return Err(format!(
@@ -1151,31 +1204,33 @@ fn apply_styles(
 pub fn check_style_chains(resources: &ResourceSet, catalog: &Catalog) -> Vec<Diagnostic> {
     fn check_dictionary(
         dictionary: &DictionaryContents,
-        scope: &Scope,
         catalog: &Catalog,
         diags: &mut Vec<Diagnostic>,
     ) {
         for (key, value) in &dictionary.entries {
             if let ResourceValue::Style(style) = value {
-                check_one_style(&format!("`{key}`"), style, scope, catalog, diags);
+                check_one_style(&format!("`{key}`"), style, dictionary, catalog, diags);
             }
         }
         for (target, style) in &dictionary.implicit_styles {
             check_one_style(
                 &format!("(implicit `{target}`)"),
                 style,
-                scope,
+                dictionary,
                 catalog,
                 diags,
             );
         }
         for merged in &dictionary.merged {
-            check_dictionary(merged, scope, catalog, diags);
+            check_dictionary(merged, catalog, diags);
         }
     }
     let mut diags = Vec::new();
     for scope in &resources.scopes {
-        check_dictionary(&scope.dictionary, scope, catalog, &mut diags);
+        check_dictionary(&scope.dictionary, catalog, &mut diags);
+    }
+    if let Some(defaults) = &resources.defaults {
+        check_dictionary(defaults, catalog, &mut diags);
     }
     diags
 }
@@ -1183,7 +1238,7 @@ pub fn check_style_chains(resources: &ResourceSet, catalog: &Catalog) -> Vec<Dia
 fn check_one_style(
     label: &str,
     style: &StyleDef,
-    scope: &Scope,
+    dictionary: &DictionaryContents,
     catalog: &Catalog,
     diags: &mut Vec<Diagnostic>,
 ) {
@@ -1264,7 +1319,7 @@ fn check_one_style(
             ));
             break;
         }
-        match scope.dictionary.get(key) {
+        match dictionary.get(key) {
             Some(ResourceValue::Style(base)) => {
                 if let (Some(a), Some(b)) = (&current.target_type, &base.target_type)
                     && a != b
@@ -2134,5 +2189,293 @@ mod tests {
         assert!(text.contains("--> demo.xaml:2:3"), "{text}");
         assert!(text.contains("2 |   <Foo/>"), "{text}");
         assert!(text.contains("  |   ^^^^"), "{text}");
+    }
+
+    /// The embedded Fluent token catalog ships inside this crate; the
+    /// host `include_str!`s the same file, so these tests pin the shipped
+    /// bytes.
+    const FLUENT_TOKENS: &str = include_str!("../assets/fluent-tokens.xaml");
+
+    fn token_set() -> ResourceSet {
+        let tokens = parse(FLUENT_TOKENS).unwrap();
+        let mut set = ResourceSet::default();
+        let diags = set.merge_app_dictionary(&tokens, &empty_resolver());
+        assert!(diags.is_empty(), "{diags:?}");
+        set
+    }
+
+    #[test]
+    fn token_brushes_differ_across_themes() {
+        let set = token_set();
+        // Sampled keys from each vendored family; values are WinUI's
+        // Common_themeresources_any.xaml Light/Dark columns.
+        assert_eq!(
+            color(set.resolve("TextFillColorPrimaryBrush", "0", Theme::Light)),
+            Some(Rgba {
+                a: 0xE4,
+                r: 0x00,
+                g: 0x00,
+                b: 0x00
+            })
+        );
+        assert_eq!(
+            color(set.resolve("TextFillColorPrimaryBrush", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF
+            })
+        );
+        assert_eq!(
+            color(set.resolve("ControlFillColorDefaultBrush", "0", Theme::Light)),
+            Some(Rgba {
+                a: 0xB3,
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF
+            })
+        );
+        assert_eq!(
+            color(set.resolve("ControlFillColorDefaultBrush", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0x0F,
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF
+            })
+        );
+        // Accent fills follow the official convention: Dark1-based in
+        // Light, Light2-based in Dark.
+        assert_eq!(
+            color(set.resolve("AccentFillColorDefaultBrush", "0", Theme::Light)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x00,
+                g: 0x5A,
+                b: 0x9E
+            })
+        );
+        assert_eq!(
+            color(set.resolve("AccentFillColorDefaultBrush", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x76,
+                g: 0xB9,
+                b: 0xED
+            })
+        );
+        assert_eq!(
+            color(set.resolve("SolidBackgroundFillColorBaseBrush", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x20,
+                g: 0x20,
+                b: 0x20
+            })
+        );
+        assert_eq!(
+            color(set.resolve("CardStrokeColorDefaultBrush", "0", Theme::Light)),
+            Some(Rgba {
+                a: 0x0F,
+                r: 0x00,
+                g: 0x00,
+                b: 0x00
+            })
+        );
+    }
+
+    #[test]
+    fn hc_entries_map_to_system_color_pairs() {
+        let set = token_set();
+        let black = Rgba {
+            a: 0xFF,
+            r: 0x00,
+            g: 0x00,
+            b: 0x00,
+        };
+        let white = Rgba {
+            a: 0xFF,
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+        };
+        // The pairing table (vendored brushes-and-icons.md; mapping per
+        // WinUI's own HighContrast dictionary): content text maps to
+        // SystemColorWindowTextColor, disabled to GrayText, interactive
+        // fills to ButtonFace, control strokes to ButtonTextColor, and
+        // the focus inner ring to WindowColor. Every mapped HC brush is
+        // fully opaque — no Opacity on HC brushes.
+        assert_eq!(
+            color(set.resolve("TextFillColorPrimaryBrush", "0", Theme::HighContrast)),
+            Some(black)
+        );
+        assert_eq!(
+            color(set.resolve("TextFillColorDisabledBrush", "0", Theme::HighContrast)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x6D,
+                g: 0x6D,
+                b: 0x6D
+            })
+        );
+        assert_eq!(
+            color(set.resolve("ControlFillColorDefaultBrush", "0", Theme::HighContrast)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0xF0,
+                g: 0xF0,
+                b: 0xF0
+            })
+        );
+        assert_eq!(
+            color(set.resolve("ControlStrokeColorDefaultBrush", "0", Theme::HighContrast)),
+            Some(black)
+        );
+        assert_eq!(
+            color(set.resolve("FocusStrokeColorInnerBrush", "0", Theme::HighContrast)),
+            Some(white)
+        );
+        assert_eq!(
+            color(set.resolve("AccentFillColorDefaultBrush", "0", Theme::HighContrast)),
+            Some(white)
+        );
+        // The HC dictionary also ships the SystemColor*Brush family.
+        assert_eq!(
+            color(set.resolve("SystemColorWindowColorBrush", "0", Theme::HighContrast)),
+            Some(white)
+        );
+        assert_eq!(
+            color(set.resolve("SystemColorHighlightColorBrush", "0", Theme::HighContrast)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x33,
+                g: 0x99,
+                b: 0xFF
+            })
+        );
+    }
+
+    #[test]
+    fn type_ramp_sizes() {
+        let set = token_set();
+        assert!(check_style_chains(&set, &Catalog::poc_subset()).is_empty());
+        let ramp = [
+            ("CaptionTextBlockStyle", "12", None),
+            ("BodyTextBlockStyle", "14", None),
+            ("BodyStrongTextBlockStyle", "14", Some("SemiBold")),
+            ("BodyLargeTextBlockStyle", "18", None),
+            ("SubtitleTextBlockStyle", "20", None),
+            ("TitleTextBlockStyle", "28", None),
+            ("TitleLargeTextBlockStyle", "40", None),
+            ("DisplayTextBlockStyle", "68", None),
+        ];
+        for (key, size, weight) in ramp {
+            let Some(ResourceValue::Style(style)) = set.resolve(key, "0", Theme::Dark) else {
+                panic!("ramp style {key} missing from the token catalog");
+            };
+            let font_size = style
+                .setters
+                .iter()
+                .find(|s| s.property == "FontSize")
+                .unwrap_or_else(|| panic!("<{key}> has no FontSize setter"));
+            assert_eq!(font_size.value, size, "{key}");
+            let font_weight = style
+                .setters
+                .iter()
+                .find(|s| s.property == "FontWeight")
+                .map(|s| s.value.as_str());
+            assert_eq!(font_weight, weight, "{key}");
+        }
+    }
+
+    #[test]
+    fn corner_radius_and_font_tokens() {
+        let set = token_set();
+        assert_eq!(
+            set.resolve("ControlCornerRadius", "0", Theme::Dark),
+            Some(&ResourceValue::Text("4".to_string()))
+        );
+        assert_eq!(
+            set.resolve("OverlayCornerRadius", "0", Theme::Dark),
+            Some(&ResourceValue::Text("8".to_string()))
+        );
+        assert_eq!(
+            set.resolve("SymbolThemeFontFamily", "0", Theme::Dark),
+            Some(&ResourceValue::Text("Segoe Fluent Icons".to_string()))
+        );
+    }
+
+    #[test]
+    fn text_tokens_validate_their_values() {
+        const BAD: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <CornerRadius x:Key="Bad">4x</CornerRadius>
+    <FontFamily x:Key="IconFont">Segoe Fluent Icons</FontFamily>
+  </Page.Resources>
+</Page>"##;
+        let (set, diags) = collect_with(BAD, &empty_resolver());
+        // A non-numeric CornerRadius is WX1002; a FontFamily accepts any
+        // text.
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1002");
+        assert_eq!(set.resolve("Bad", "0", Theme::Dark), None);
+        assert_eq!(
+            set.resolve("IconFont", "0", Theme::Dark),
+            Some(&ResourceValue::Text("Segoe Fluent Icons".to_string()))
+        );
+    }
+
+    #[test]
+    fn page_scope_wins_over_app_dictionary() {
+        const DOC: &str = r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <SolidColorBrush x:Key="TextFillColorPrimaryBrush" Color="#FF123456"/>
+  </Page.Resources>
+  <TextBlock Text="a" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+</Page>"##;
+        let tree = parse(DOC).unwrap();
+        let (mut set, diags) = collect_resources(&tree, &empty_resolver());
+        assert!(diags.is_empty(), "{diags:?}");
+        let tokens = parse(FLUENT_TOKENS).unwrap();
+        let merge_diags = set.merge_app_dictionary(&tokens, &empty_resolver());
+        assert!(merge_diags.is_empty(), "{merge_diags:?}");
+        // Tokens are the last lookup step (WinUI element → page → app):
+        // the page-level entry overrides the catalog key…
+        assert_eq!(
+            color(set.resolve("TextFillColorPrimaryBrush", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xFF,
+                r: 0x12,
+                g: 0x34,
+                b: 0x56
+            })
+        );
+        // …and token-only keys still answer page references.
+        assert_eq!(
+            color(set.resolve("TextFillColorSecondaryBrush", "0", Theme::Dark)),
+            Some(Rgba {
+                a: 0xC5,
+                r: 0xFF,
+                g: 0xFF,
+                b: 0xFF
+            })
+        );
+        let diags = check_resource_references(&tree, &set, Theme::Dark);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn app_dictionary_root_must_be_a_resource_dictionary() {
+        let root =
+            parse(r#"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"/>"#)
+                .unwrap();
+        let mut set = ResourceSet::default();
+        let diags = set.merge_app_dictionary(&root, &empty_resolver());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "WX1005");
+        assert_eq!(diags[0].severity, Severity::Error);
     }
 }

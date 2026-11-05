@@ -45,6 +45,39 @@ fn demo_xaml_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/demo.xaml")
 }
 
+/// The embedded Fluent 2 token catalog (REQ-TOK-01..04). It merges ahead
+/// of app resources through `merge_app_dictionary`, so page and app
+/// definitions win over tokens — WinUI's element → page → app lookup.
+const FLUENT_TOKENS_XAML: &str =
+    include_str!("../crates/winui-xaml-model/assets/fluent-tokens.xaml");
+
+/// PoC theme selection: `POC_THEME=Light|Dark|HighContrast`. Dark is the
+/// default until OS theme detection lands (REQ-TOK-01); an unknown value
+/// fails the run loudly.
+fn theme_from_name(name: &str) -> Result<Theme, String> {
+    match name.trim() {
+        "Light" => Ok(Theme::Light),
+        "Dark" => Ok(Theme::Dark),
+        "HighContrast" => Ok(Theme::HighContrast),
+        other => Err(format!(
+            "POC_THEME=\"{other}\" is not Light, Dark, or HighContrast"
+        )),
+    }
+}
+
+fn poc_theme() -> Theme {
+    match std::env::var("POC_THEME") {
+        Err(_) => Theme::Dark,
+        Ok(name) => match theme_from_name(&name) {
+            Ok(theme) => theme,
+            Err(message) => {
+                eprintln!("[xaml] {message}");
+                std::process::exit(1);
+            }
+        },
+    }
+}
+
 impl Render for DemoApp {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut bindings = HashMap::new();
@@ -109,9 +142,10 @@ impl SourceResolver for DemoSourceResolver {
 }
 
 /// All load-time diagnostics for one parsed tree: resource collection
-/// (including `Source` files next to demo.xaml), style-chain validation,
-/// catalog resolution, and resource-reference checks. Also returns the
-/// collected resources for rendering.
+/// (including `Source` files next to demo.xaml), the merged Fluent token
+/// catalog, style-chain validation, catalog resolution, and
+/// resource-reference checks. Also returns the collected resources for
+/// rendering.
 fn startup_diagnostics(tree: &XamlElement, theme: Theme) -> (ResourceSet, Vec<Diagnostic>) {
     let resolver = DemoSourceResolver {
         base: demo_xaml_path()
@@ -119,7 +153,9 @@ fn startup_diagnostics(tree: &XamlElement, theme: Theme) -> (ResourceSet, Vec<Di
             .map(Path::to_path_buf)
             .unwrap_or_default(),
     };
-    let (resources, mut diags) = collect_resources(tree, &resolver);
+    let (mut resources, mut diags) = collect_resources(tree, &resolver);
+    let tokens = parse(FLUENT_TOKENS_XAML).expect("embedded Fluent token catalog failed to parse");
+    diags.extend(resources.merge_app_dictionary(&tokens, &resolver));
     diags.extend(check_style_chains(&resources, &Catalog::poc_subset()));
     diags.extend(resolve(tree, &Catalog::poc_subset()));
     diags.extend(check_resource_references(tree, &resources, theme));
@@ -136,8 +172,7 @@ fn main() {
         }
     };
     let tree = parse(&xaml_src).expect("XAML failed to parse");
-    // The demo renders dark; OS theme detection arrives with REQ-TOK-01.
-    let theme = Theme::Dark;
+    let theme = poc_theme();
     // REQ-DIAG-01/02: load-time diagnostics with file/line. Errors stop the
     // run before a window opens; warnings print and rendering continues.
     let (resources, diags) = startup_diagnostics(&tree, theme);
@@ -203,11 +238,21 @@ mod tests {
     fn demo_resolves_clean_against_the_catalog() {
         let src = std::fs::read_to_string(demo_xaml_path()).unwrap();
         let tree = parse(&src).unwrap();
+        // Also covers the merged Fluent token catalog: startup_diagnostics
+        // merges it into the same resource set.
         let (_, diags) = startup_diagnostics(&tree, Theme::Dark);
         assert!(
             diags.is_empty(),
             "demo.xaml must stay inside the PoC dialect: {diags:?}"
         );
+    }
+
+    #[test]
+    fn theme_names_parse() {
+        assert_eq!(theme_from_name("Light"), Ok(Theme::Light));
+        assert_eq!(theme_from_name(" Dark "), Ok(Theme::Dark));
+        assert_eq!(theme_from_name("HighContrast"), Ok(Theme::HighContrast));
+        assert!(theme_from_name("midnight").is_err());
     }
 
     #[test]

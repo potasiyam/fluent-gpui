@@ -200,8 +200,9 @@ theme dictionaries.
   `Subtitle`(20) `BodyLarge`(18) `BodyStrong`(14 semi-bold) `Body`(14)
   `Caption`(12), `Display`(68) — plus `SymbolThemeFontFamily` indirection
   for icons.
-  (Sizes per Fluent 2 type ramp [V — Fluent 2 public spec]; values in
-  tokens.rs with a single override point.) [D on exact px audit at M2]
+  (Sizes per Fluent 2 type ramp [V — Fluent 2 public spec]; values ship in
+  the embedded token dictionary
+  `crates/winui-xaml-model/assets/fluent-tokens.xaml`.) [D on exact px audit at M2]
 - REQ-TOK-03 (Must, M1): **spacing** 4px grid, **corner radius** tokens
   (`ControlCornerRadius`=4, `OverlayCornerRadius`=8) [V — vendored rules],
   **elevation** shadow tokens (§8.2).

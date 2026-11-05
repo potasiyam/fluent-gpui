@@ -45,6 +45,7 @@ const RESOLVED_EXTENSION_ATTRS: &[&str] = &[
     "Background",
     "Foreground",
     "BorderBrush",
+    "CornerRadius",
     "Style",
 ];
 
@@ -151,11 +152,17 @@ fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyE
     if let Some(c) = resolve_color(el, "Foreground", path, ctx) {
         d = d.text_color(c);
     }
+    // WinUI FontWeight subset the PoC renders.
     if el
         .attr("FontWeight")
         .is_some_and(|w| w.trim().eq_ignore_ascii_case("bold"))
     {
         d = d.font_weight(gpui::FontWeight::BOLD);
+    } else if el
+        .attr("FontWeight")
+        .is_some_and(|w| w.trim().eq_ignore_ascii_case("semibold"))
+    {
+        d = d.font_weight(gpui::FontWeight::SEMIBOLD);
     }
     apply_common(d, el).into_any_element()
 }
@@ -165,7 +172,7 @@ fn border<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyEleme
     if let Some(bg) = resolve_color(el, "Background", path, ctx) {
         d = d.bg(bg);
     }
-    if let Some(cr) = attr_f32(el, "CornerRadius") {
+    if let Some(cr) = resolve_number(el, "CornerRadius", path, ctx) {
         d = d.rounded(px(cr));
     }
     // PoC approximation: any BorderThickness > 0 renders as 1px.
@@ -298,14 +305,7 @@ fn resolve_markup<V>(
 }
 
 fn attr_f32(el: &XamlElement, attr: &str) -> Option<f32> {
-    let v = el.attr(attr)?.trim();
-    match v.parse() {
-        Ok(n) => Some(n),
-        Err(_) => {
-            eprintln!("[xaml] attribute {attr}=\"{v}\" is not a number; ignored");
-            None
-        }
-    }
+    attr_f32_of(el.attr(attr)?.trim(), attr)
 }
 
 /// WinUI edge format: "12", "leftRight,topBottom" (2 values), or
@@ -358,7 +358,7 @@ fn resolve_color_value(
         .or_else(|| resource_key(v, "ThemeResource"))
         .map(|key| match resources.resolve(key, path, theme) {
             Some(ResourceValue::Color(c)) => Some(to_gpui(*c)),
-            Some(ResourceValue::Style(_)) | None => {
+            Some(ResourceValue::Style(_)) | Some(ResourceValue::Text(_)) | None => {
                 eprintln!(
                     "[xaml] {attr}=\"{v}\" resolved no color resource \"{key}\"; leaving the property unset"
                 );
@@ -372,6 +372,71 @@ fn resolve_color_value(
         );
     }
     parsed
+}
+
+/// Resolves a number-valued attribute: a `{StaticResource …}`/
+/// `{ThemeResource …}` value looks up a text resource (WinUI's
+/// `CornerRadius`/`String` resources), anything else parses as a literal.
+/// Returns `None` and warns when the value cannot be used — no part of a
+/// bad value is applied.
+fn resolve_number_value(
+    raw: &str,
+    attr: &str,
+    path: &str,
+    resources: &ResourceSet,
+    theme: Theme,
+) -> Option<f32> {
+    let v = raw.trim();
+    if let Some(key) =
+        resource_key(v, "StaticResource").or_else(|| resource_key(v, "ThemeResource"))
+    {
+        return match resources.resolve(key, path, theme) {
+            Some(ResourceValue::Text(t)) => match t.trim().parse::<f32>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!(
+                        "[xaml] {attr}=\"{v}\" resource \"{key}\" value \"{t}\" is not a number; leaving the property unset"
+                    );
+                    None
+                }
+            },
+            Some(_) => {
+                eprintln!(
+                    "[xaml] {attr}=\"{v}\" resource \"{key}\" is not a number value; leaving the property unset"
+                );
+                None
+            }
+            None => {
+                eprintln!(
+                    "[xaml] {attr}=\"{v}\" resolved no number resource \"{key}\"; leaving the property unset"
+                );
+                None
+            }
+        };
+    }
+    attr_f32_of(v, attr)
+}
+
+/// The element-level half of [`resolve_number_value`].
+fn resolve_number<V>(
+    el: &XamlElement,
+    attr: &str,
+    path: &str,
+    ctx: &XamlContext<'_, V>,
+) -> Option<f32> {
+    resolve_number_value(el.attr(attr)?, attr, path, ctx.resources, ctx.theme)
+}
+
+/// Parses a literal number, warning like [`attr_f32`] but on a value that
+/// was already extracted.
+fn attr_f32_of(v: &str, attr: &str) -> Option<f32> {
+    match v.parse() {
+        Ok(n) => Some(n),
+        Err(_) => {
+            eprintln!("[xaml] attribute {attr}=\"{v}\" is not a number; ignored");
+            None
+        }
+    }
 }
 
 /// `Rgba` is `#AARRGGBB`-ordered; gpui's rgba() wants 0xRRGGBBAA.
@@ -398,6 +463,56 @@ mod tests {
         let (resources, diags) = winui_xaml_model::collect_resources(&tree, &NoSources);
         assert!(diags.is_empty(), "{diags:?}");
         resources
+    }
+
+    #[test]
+    fn numbers_resolve_from_text_resources_and_literals() {
+        let set = resources_from(
+            r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <CornerRadius x:Key="ControlCornerRadius">4</CornerRadius>
+    <FontFamily x:Key="IconFont">Segoe Fluent Icons</FontFamily>
+  </Page.Resources>
+</Page>"##,
+        );
+        // A theme-resource value resolves the text token; a literal
+        // parses directly; a non-number resource and a missing key leave
+        // the property unset.
+        assert_eq!(
+            resolve_number_value(
+                "{ThemeResource ControlCornerRadius}",
+                "CornerRadius",
+                "0",
+                &set,
+                Theme::Dark
+            ),
+            Some(4.0)
+        );
+        assert_eq!(
+            resolve_number_value("8", "CornerRadius", "0", &set, Theme::Dark),
+            Some(8.0)
+        );
+        assert_eq!(
+            resolve_number_value(
+                "{ThemeResource IconFont}",
+                "CornerRadius",
+                "0",
+                &set,
+                Theme::Dark
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_number_value(
+                "{ThemeResource Missing}",
+                "CornerRadius",
+                "0",
+                &set,
+                Theme::Dark
+            ),
+            None
+        );
     }
 
     #[test]
