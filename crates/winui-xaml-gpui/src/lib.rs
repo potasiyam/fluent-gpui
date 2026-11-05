@@ -31,8 +31,11 @@ pub struct XamlContext<'a, V: 'static> {
     /// Collected page resources (REQ-RES-01); `{StaticResource}` and
     /// `{ThemeResource}` values resolve against it.
     pub resources: &'a ResourceSet,
-    /// Active theme for theme-dictionary lookups.
-    pub theme: Theme,
+    /// The theme the page loaded with; `{StaticResource}` resolves once
+    /// against it and never follows a switch (WinUI semantics). The
+    /// active theme travels as the `render_element` argument instead,
+    /// re-resolving `{ThemeResource}` per render (REQ-TOK-05).
+    pub load_theme: Theme,
     /// Lets `Click=` handlers mutate the owning view and re-render it.
     pub view: WeakEntity<V>,
 }
@@ -49,17 +52,42 @@ const RESOLVED_EXTENSION_ATTRS: &[&str] = &[
     "Style",
 ];
 
-pub fn render_element<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
+pub fn render_element<V>(
+    el: &XamlElement,
+    ctx: &XamlContext<'_, V>,
+    path: &str,
+    theme: Theme,
+) -> AnyElement {
+    // A subtree root's RequestedTheme overrides the active theme for its
+    // subtree (REQ-TOK-05).
+    let theme = subtree_theme(el, theme);
     warn_unresolved_extensions(el);
     match el.name.as_str() {
-        "Page" | "UserControl" => container(el, ctx, path, true),
-        "StackPanel" => container(el, ctx, path, false),
-        "TextBlock" => align_wrap(el, text_block(el, ctx, path)),
-        "Border" => align_wrap(el, border(el, ctx, path)),
-        "Button" => align_wrap(el, button(el, ctx, path)),
+        "Page" | "UserControl" => container(el, ctx, path, theme, true),
+        "StackPanel" => container(el, ctx, path, theme, false),
+        "TextBlock" => align_wrap(el, text_block(el, ctx, path, theme)),
+        "Border" => align_wrap(el, border(el, ctx, path, theme)),
+        "Button" => align_wrap(el, button(el, ctx, path, theme)),
         other => {
             eprintln!("[xaml] <{other}> not in PoC subset; rendering as plain container");
-            align_wrap(el, container(el, ctx, path, false))
+            align_wrap(el, container(el, ctx, path, theme, false))
+        }
+    }
+}
+
+/// The theme `{ThemeResource}` resolves against for `el` and its subtree:
+/// its `RequestedTheme` attribute if it names a theme (REQ-TOK-05), else
+/// the inherited theme. WinUI's `ElementTheme.Default` is the inherited
+/// value.
+fn subtree_theme(el: &XamlElement, inherited: Theme) -> Theme {
+    match el.attr("RequestedTheme").map(str::trim) {
+        None => inherited,
+        Some("Light") => Theme::Light,
+        Some("Dark") => Theme::Dark,
+        Some("HighContrast") => Theme::HighContrast,
+        Some(other) => {
+            eprintln!("[xaml] RequestedTheme=\"{other}\" is not Light/Dark/HighContrast; ignoring");
+            inherited
         }
     }
 }
@@ -100,6 +128,7 @@ fn container<V>(
     el: &XamlElement,
     ctx: &XamlContext<'_, V>,
     path: &str,
+    theme: Theme,
     is_page: bool,
 ) -> AnyElement {
     let vertical = el
@@ -119,7 +148,7 @@ fn container<V>(
     if let Some((l, t, r, b)) = attr_edges(el, "Padding") {
         d = d.pl(px(l)).pt(px(t)).pr(px(r)).pb(px(b));
     }
-    if let Some(bg) = resolve_color(el, "Background", path, ctx) {
+    if let Some(bg) = resolve_color(el, "Background", path, ctx, theme) {
         d = d.bg(bg);
     }
 
@@ -128,13 +157,18 @@ fn container<V>(
         .iter()
         .enumerate()
         .filter(|(_, c)| !is_collapsed(c))
-        .map(|(i, c)| render_element(c, ctx, &format!("{path}.{i}")))
+        .map(|(i, c)| render_element(c, ctx, &format!("{path}.{i}"), theme))
         .collect();
     d = d.children(kids);
     apply_common(d, el).into_any_element()
 }
 
-fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
+fn text_block<V>(
+    el: &XamlElement,
+    ctx: &XamlContext<'_, V>,
+    path: &str,
+    theme: Theme,
+) -> AnyElement {
     if !el.children.is_empty() {
         eprintln!(
             "[xaml] <TextBlock> element children are not supported in the PoC subset; dropped"
@@ -149,7 +183,7 @@ fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyE
     if let Some(fs) = attr_f32(el, "FontSize") {
         d = d.text_size(px(fs));
     }
-    if let Some(c) = resolve_color(el, "Foreground", path, ctx) {
+    if let Some(c) = resolve_color(el, "Foreground", path, ctx, theme) {
         d = d.text_color(c);
     }
     // WinUI FontWeight subset the PoC renders.
@@ -167,18 +201,18 @@ fn text_block<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyE
     apply_common(d, el).into_any_element()
 }
 
-fn border<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
+fn border<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str, theme: Theme) -> AnyElement {
     let mut d = div().flex().flex_col();
-    if let Some(bg) = resolve_color(el, "Background", path, ctx) {
+    if let Some(bg) = resolve_color(el, "Background", path, ctx, theme) {
         d = d.bg(bg);
     }
-    if let Some(cr) = resolve_number(el, "CornerRadius", path, ctx) {
+    if let Some(cr) = resolve_number(el, "CornerRadius", path, ctx, theme) {
         d = d.rounded(px(cr));
     }
     // PoC approximation: any BorderThickness > 0 renders as 1px.
     if attr_f32(el, "BorderThickness").is_some_and(|t| t > 0.0) {
         d = d.border_1();
-        if let Some(bc) = resolve_color(el, "BorderBrush", path, ctx) {
+        if let Some(bc) = resolve_color(el, "BorderBrush", path, ctx, theme) {
             d = d.border_color(bc);
         }
     }
@@ -190,13 +224,13 @@ fn border<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyEleme
         .iter()
         .enumerate()
         .filter(|(_, c)| !is_collapsed(c))
-        .map(|(i, c)| render_element(c, ctx, &format!("{path}.{i}")))
+        .map(|(i, c)| render_element(c, ctx, &format!("{path}.{i}"), theme))
         .collect();
     d = d.children(kids);
     apply_common(d, el).into_any_element()
 }
 
-fn button<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str) -> AnyElement {
+fn button<V>(el: &XamlElement, ctx: &XamlContext<'_, V>, path: &str, _theme: Theme) -> AnyElement {
     if !el.children.is_empty() {
         eprintln!("[xaml] <Button> element children are not supported in the PoC subset; dropped");
     }
@@ -340,8 +374,16 @@ fn resolve_color<V>(
     attr: &str,
     path: &str,
     ctx: &XamlContext<'_, V>,
+    theme: Theme,
 ) -> Option<gpui::Rgba> {
-    resolve_color_value(el.attr(attr)?, attr, path, ctx.resources, ctx.theme)
+    resolve_color_value(
+        el.attr(attr)?,
+        attr,
+        path,
+        ctx.resources,
+        theme,
+        ctx.load_theme,
+    )
 }
 
 /// The value-level half of [`resolve_color`], split out so tests can drive
@@ -352,11 +394,15 @@ fn resolve_color_value(
     path: &str,
     resources: &ResourceSet,
     theme: Theme,
+    load_theme: Theme,
 ) -> Option<gpui::Rgba> {
     let v = raw.trim();
+    // `{StaticResource}` resolves once at load (never follows a theme
+    // switch); `{ThemeResource}` re-resolves against the active theme.
     let parsed = resource_key(v, "StaticResource")
-        .or_else(|| resource_key(v, "ThemeResource"))
-        .map(|key| match resources.resolve(key, path, theme) {
+        .map(|key| (key, load_theme))
+        .or_else(|| resource_key(v, "ThemeResource").map(|key| (key, theme)))
+        .map(|(key, lookup)| match resources.resolve(key, path, lookup) {
             Some(ResourceValue::Color(c)) => Some(to_gpui(*c)),
             Some(ResourceValue::Style(_)) | Some(ResourceValue::Text(_)) | None => {
                 eprintln!(
@@ -385,12 +431,14 @@ fn resolve_number_value(
     path: &str,
     resources: &ResourceSet,
     theme: Theme,
+    load_theme: Theme,
 ) -> Option<f32> {
     let v = raw.trim();
-    if let Some(key) =
-        resource_key(v, "StaticResource").or_else(|| resource_key(v, "ThemeResource"))
-    {
-        return match resources.resolve(key, path, theme) {
+    let lookup = resource_key(v, "StaticResource")
+        .map(|key| (key, load_theme))
+        .or_else(|| resource_key(v, "ThemeResource").map(|key| (key, theme)));
+    if let Some((key, lookup_theme)) = lookup {
+        return match resources.resolve(key, path, lookup_theme) {
             Some(ResourceValue::Text(t)) => match t.trim().parse::<f32>() {
                 Ok(n) => Some(n),
                 Err(_) => {
@@ -423,8 +471,16 @@ fn resolve_number<V>(
     attr: &str,
     path: &str,
     ctx: &XamlContext<'_, V>,
+    theme: Theme,
 ) -> Option<f32> {
-    resolve_number_value(el.attr(attr)?, attr, path, ctx.resources, ctx.theme)
+    resolve_number_value(
+        el.attr(attr)?,
+        attr,
+        path,
+        ctx.resources,
+        theme,
+        ctx.load_theme,
+    )
 }
 
 /// Parses a literal number, warning like [`attr_f32`] but on a value that
@@ -485,12 +541,13 @@ mod tests {
                 "CornerRadius",
                 "0",
                 &set,
+                Theme::Dark,
                 Theme::Dark
             ),
             Some(4.0)
         );
         assert_eq!(
-            resolve_number_value("8", "CornerRadius", "0", &set, Theme::Dark),
+            resolve_number_value("8", "CornerRadius", "0", &set, Theme::Dark, Theme::Dark),
             Some(8.0)
         );
         assert_eq!(
@@ -499,6 +556,7 @@ mod tests {
                 "CornerRadius",
                 "0",
                 &set,
+                Theme::Dark,
                 Theme::Dark
             ),
             None
@@ -509,6 +567,7 @@ mod tests {
                 "CornerRadius",
                 "0",
                 &set,
+                Theme::Dark,
                 Theme::Dark
             ),
             None
@@ -543,15 +602,15 @@ mod tests {
 
         // Literal forms: 8-digit hex, 6-digit hex, named.
         assert_eq!(
-            resolve_color_value("#FF4EC9B0", "Background", "0", &resources, dark),
+            resolve_color_value("#FF4EC9B0", "Background", "0", &resources, dark, dark),
             teal
         );
         assert_eq!(
-            resolve_color_value("#4EC9B0", "Background", "0", &resources, dark),
+            resolve_color_value("#4EC9B0", "Background", "0", &resources, dark, dark),
             teal
         );
         assert_eq!(
-            resolve_color_value("transparent", "Background", "0", &resources, dark),
+            resolve_color_value("transparent", "Background", "0", &resources, dark, dark),
             Some(gpui::rgba(0x00000000))
         );
 
@@ -562,6 +621,7 @@ mod tests {
                 "Background",
                 "0.1",
                 &resources,
+                dark,
                 dark
             ),
             teal
@@ -572,6 +632,7 @@ mod tests {
                 "Foreground",
                 "0",
                 &resources,
+                dark,
                 dark
             ),
             teal
@@ -579,15 +640,29 @@ mod tests {
 
         // Misses and non-colors leave the property unset.
         assert_eq!(
-            resolve_color_value("{StaticResource Nope}", "Background", "0", &resources, dark),
+            resolve_color_value(
+                "{StaticResource Nope}",
+                "Background",
+                "0",
+                &resources,
+                dark,
+                dark
+            ),
             None
         );
         assert_eq!(
-            resolve_color_value("{x:Bind SomePath}", "Background", "0", &resources, dark),
+            resolve_color_value(
+                "{x:Bind SomePath}",
+                "Background",
+                "0",
+                &resources,
+                dark,
+                dark
+            ),
             None
         );
         assert_eq!(
-            resolve_color_value("nope", "Background", "0", &resources, dark),
+            resolve_color_value("nope", "Background", "0", &resources, dark, dark),
             None
         );
     }
@@ -608,5 +683,129 @@ mod tests {
         assert_eq!(edges("12,abc"), None);
         assert_eq!(edges("1,2,3"), None);
         assert_eq!(edges(""), None);
+    }
+
+    /// Theme-keyed brush: Light #FF111111, Dark #FFF3F3F3.
+    fn themed_set() -> ResourceSet {
+        resources_from(
+            r##"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Page.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="K" Color="#FF111111"/>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="K" Color="#FFF3F3F3"/>
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Page.Resources>
+</Page>"##,
+        )
+    }
+
+    #[test]
+    fn static_resource_freezes_at_load_theme() {
+        let set = themed_set();
+        let dark_value = Some(gpui::rgba(0xF3F3F3FF));
+        let light_value = Some(gpui::rgba(0x111111FF));
+        // A {StaticResource} resolves once at load: it answers with the
+        // load theme's value no matter which theme is active now (WinUI:
+        // {StaticResource} does not follow theme switches).
+        assert_eq!(
+            resolve_color_value(
+                "{StaticResource K}",
+                "Foreground",
+                "0",
+                &set,
+                Theme::Dark,
+                Theme::Light
+            ),
+            light_value
+        );
+        assert_eq!(
+            resolve_color_value(
+                "{StaticResource K}",
+                "Foreground",
+                "0",
+                &set,
+                Theme::Light,
+                Theme::Dark
+            ),
+            dark_value
+        );
+    }
+
+    #[test]
+    fn theme_resource_reresolves_on_switch() {
+        let set = themed_set();
+        let dark_value = Some(gpui::rgba(0xF3F3F3FF));
+        let light_value = Some(gpui::rgba(0x111111FF));
+        // A {ThemeResource} re-resolves against the active theme, even
+        // when it was loaded under another one.
+        assert_eq!(
+            resolve_color_value(
+                "{ThemeResource K}",
+                "Foreground",
+                "0",
+                &set,
+                Theme::Dark,
+                Theme::Light
+            ),
+            dark_value
+        );
+        assert_eq!(
+            resolve_color_value(
+                "{ThemeResource K}",
+                "Foreground",
+                "0",
+                &set,
+                Theme::Light,
+                Theme::Dark
+            ),
+            light_value
+        );
+    }
+
+    #[test]
+    fn requested_theme_overrides_only_its_subtree() {
+        let tree = parse(
+            r#"<Page xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <StackPanel RequestedTheme="Light">
+    <Border/>
+  </StackPanel>
+  <Border/>
+</Page>"#,
+        )
+        .unwrap();
+        let app = Theme::Dark;
+        // The page root inherits the active app theme...
+        assert_eq!(subtree_theme(&tree, app), app);
+        // ...the subtree root overrides for everything below it...
+        let overridden = subtree_theme(&tree.children[0], app);
+        assert_eq!(overridden, Theme::Light);
+        assert_eq!(
+            subtree_theme(&tree.children[0].children[0], overridden),
+            Theme::Light
+        );
+        // ...and the sibling subtree keeps the app theme.
+        assert_eq!(subtree_theme(&tree.children[1], app), app);
+        // HighContrast is our dialect extension (WinUI's ElementTheme is
+        // Default/Light/Dark; PRD §6 REQ-TOK-05 [D]) and resolves to the
+        // HC token dictionary.
+        let hc = parse(
+            r#"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" RequestedTheme="HighContrast"/>"#,
+        )
+        .unwrap();
+        assert_eq!(subtree_theme(&hc, app), Theme::HighContrast);
+        // An unknown value falls back to the inherited theme.
+        let bad = parse(
+            r#"<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" RequestedTheme="midnight"/>"#,
+        )
+        .unwrap();
+        assert_eq!(subtree_theme(&bad, app), app);
     }
 }

@@ -256,3 +256,40 @@ mechanics (runtime trees, event/state loop) are proven.
 > `POC_AUTOCLOSE_SECS=6` (default Dark) and `POC_THEME=Light|Dark
 > POC_AUTOCLOSE_SECS=12` runs all exit 0 with an empty app stderr,
 > `m1-token-catalog-dark.png`, `m1-token-catalog-light.png`.
+
+> **Update (2026-11-05, M1 live theme switch):** REQ-TOK-05 lands. The
+> active theme now lives in host view state: `{ThemeResource}` values in
+> color and number attributes re-resolve against it on every re-render
+> (theme change → update + notify, no window recreation), while style
+> selection (`Style=` keys, implicit styles) still resolves once at load —
+> unobservable today because no styles come from theme dictionaries and
+> demo.xaml keys styles with `{StaticResource}`. `{StaticResource}`
+> resolves once against the load theme and never follows a switch (WinUI
+> semantics; PRD §5.2 "resolve once at tree build"). `RequestedTheme` on any subtree
+> root overrides the active theme for that subtree only (renderer walks
+> with an effective theme; `RequestedTheme` joined the common catalog
+> properties). The initial theme comes from the OS: `App::window_appearance()`
+> at startup, and OS appearance changes drive the same re-resolution
+> through `Window::observe_window_appearance` — step 2's `POC_THEME` env
+> seam is removed. Two platform notes: gpui-pre 0.3.8's
+> `WindowAppearance` has no HighContrast variant, so OS HC detection is
+> not reachable through gpui — HC rendering goes through
+> `RequestedTheme="HighContrast"` on a subtree over the token catalog's HC
+> dictionary. That value is a dialect extension: WinUI's `ElementTheme` is
+> Default/Light/Dark only (MS Learn), so accepting `HighContrast` is
+> recorded as [D] in PRD §6 REQ-TOK-05; a live OS HC reader would need a
+> registry read (new dependency, deferred), and the HC capture rides the
+> PRD §15 "Light+Dark+HC" gate at M1 exit. And the window surface itself is still not
+> token-driven (M2 `Window` element), so light brushes render against the
+> dark Mica surface in the captures. Evidence: `cargo test --workspace`
+> 48/48 — new renderer tests pin that a `StaticResource` stays at its
+> load-theme value across a switch, a `ThemeResource` re-resolves, and a
+> `RequestedTheme` subtree overrides without leaking to siblings; a host
+> test pins the appearance→theme mapping. `POC_AUTOCLOSE_SECS=6 cargo
+> run` exits 0 with an empty stderr. The acceptance flip run
+> (`POC_FLIP_THEME_SECS=10`, autoclose 30s) captured before/after
+> screenshots from the same process with no restart —
+> `m1-live-theme-switch-before.png` (Dark) and
+> `m1-live-theme-switch-after.png` (the same window 11 seconds later,
+> re-resolved to Light brushes). `cargo fmt` and `cargo clippy
+> --all-targets --workspace` clean.

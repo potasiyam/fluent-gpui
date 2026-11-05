@@ -94,6 +94,7 @@ const COMMON_PROPERTIES: &[&str] = &[
     "HorizontalAlignment",
     "Margin",
     "Opacity",
+    "RequestedTheme",
     "Style",
     "Visibility",
     "Width",

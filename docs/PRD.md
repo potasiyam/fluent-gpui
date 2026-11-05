@@ -217,7 +217,12 @@ theme dictionaries.
   dictionaries. `AnimatedIcon` in §9.2 (REQ-MOT-08).
 - REQ-TOK-05 (Must, M1): theme switch at runtime (`RequestedTheme` on any
   subtree root) re-resolves `{ThemeResource}` without window recreation;
-  `{StaticResource}` stays put — matching WinUI semantics.
+  `{StaticResource}` stays put — matching WinUI semantics. Our
+  `RequestedTheme` value domain extends WinUI's `ElementTheme`
+  (Default/Light/Dark) with `HighContrast` [D]: gpui-pre 0.3.8's
+  `WindowAppearance` has no HighContrast variant, so the explicit subtree
+  override over the token catalog's HC dictionary is the PoC's HC surface;
+  OS HighContrast detection would need a registry read (deferred).
 
 ## 7. Materials
 

@@ -2,7 +2,10 @@
 //! GPUI through the winui-xaml crates.
 //!
 //! Run: `cargo run` (or `POC_AUTOCLOSE_SECS=4 cargo run` for a self-closing
-//! run used by the automated feasibility check).
+//! run used by the automated feasibility check). The initial theme is the
+//! OS theme; OS appearance changes re-resolve `{ThemeResource}` live, and
+//! `POC_FLIP_THEME_SECS=N` flips the theme N seconds in — the same
+//! update/notify path, without a restart (REQ-TOK-05 evidence seam).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, Render, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, prelude::*, px, size,
+    App, Bounds, Context, Render, TitlebarOptions, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions, prelude::*, px, size,
 };
 use winui_xaml_gpui::{HandlerFn, XamlContext, render_element};
 use winui_xaml_model::{
@@ -31,7 +34,12 @@ struct DemoApp {
     state: AppState,
     handlers: HashMap<String, HandlerFn<DemoApp>>,
     resources: ResourceSet,
+    /// Active theme: the OS appearance, flipped live by the appearance
+    /// observer and the `POC_FLIP_THEME_SECS` seam. `{ThemeResource}`
+    /// re-resolves against it on change.
     theme: Theme,
+    /// The theme the page loaded with; `{StaticResource}` stays here.
+    load_theme: Theme,
     backdrop: WindowBackgroundAppearance,
 }
 
@@ -51,30 +59,14 @@ fn demo_xaml_path() -> PathBuf {
 const FLUENT_TOKENS_XAML: &str =
     include_str!("../crates/winui-xaml-model/assets/fluent-tokens.xaml");
 
-/// PoC theme selection: `POC_THEME=Light|Dark|HighContrast`. Dark is the
-/// default until OS theme detection lands (REQ-TOK-01); an unknown value
-/// fails the run loudly.
-fn theme_from_name(name: &str) -> Result<Theme, String> {
-    match name.trim() {
-        "Light" => Ok(Theme::Light),
-        "Dark" => Ok(Theme::Dark),
-        "HighContrast" => Ok(Theme::HighContrast),
-        other => Err(format!(
-            "POC_THEME=\"{other}\" is not Light, Dark, or HighContrast"
-        )),
-    }
-}
-
-fn poc_theme() -> Theme {
-    match std::env::var("POC_THEME") {
-        Err(_) => Theme::Dark,
-        Ok(name) => match theme_from_name(&name) {
-            Ok(theme) => theme,
-            Err(message) => {
-                eprintln!("[xaml] {message}");
-                std::process::exit(1);
-            }
-        },
+/// Maps the OS window appearance to the dialect theme. gpui-pre 0.3.8's
+/// `WindowAppearance` has no HighContrast variant, so OS HighContrast
+/// detection is not reachable through it — `RequestedTheme` on a subtree
+/// is the PoC's HC surface.
+fn app_theme(appearance: WindowAppearance) -> Theme {
+    match appearance {
+        WindowAppearance::Light | WindowAppearance::VibrantLight => Theme::Light,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => Theme::Dark,
     }
 }
 
@@ -90,7 +82,7 @@ impl Render for DemoApp {
             handlers: &self.handlers,
             bindings: &bindings,
             resources: &self.resources,
-            theme: self.theme,
+            load_theme: self.load_theme,
             view: cx.entity().downgrade(),
         };
 
@@ -100,7 +92,7 @@ impl Render for DemoApp {
         if self.backdrop == WindowBackgroundAppearance::Opaque {
             root = root.bg(gpui::rgb(0x1F1F1F));
         }
-        root.child(render_element(&self.tree, &ctx, "0"))
+        root.child(render_element(&self.tree, &ctx, "0", self.theme))
     }
 }
 
@@ -172,27 +164,42 @@ fn main() {
         }
     };
     let tree = parse(&xaml_src).expect("XAML failed to parse");
-    let theme = poc_theme();
-    // REQ-DIAG-01/02: load-time diagnostics with file/line. Errors stop the
-    // run before a window opens; warnings print and rendering continues.
-    let (resources, diags) = startup_diagnostics(&tree, theme);
-    if !diags.is_empty() {
-        eprint!(
-            "{}",
-            render_diagnostics(&xaml_path.display().to_string(), &xaml_src, &diags)
-        );
-        if diags.iter().any(|d| d.severity == Severity::Error) {
-            std::process::exit(1);
-        }
-    }
     let backdrop = backdrop_from_xaml(&tree);
-    // Setter values join the attribute set here (local values win); the
-    // renderer renders the resolved tree unchanged.
-    let resolved = resolve_styles(&tree, &resources, theme);
     let handlers = demo_handlers();
 
     gpui_platform::application().run(move |cx: &mut App| {
+        // REQ-TOK-05: the initial theme is the OS theme.
+        let theme = app_theme(cx.window_appearance());
+        // REQ-DIAG-01/02: load-time diagnostics with file/line. Errors stop
+        // the run before a window opens; warnings print and rendering
+        // continues.
+        let (resources, diags) = startup_diagnostics(&tree, theme);
+        if !diags.is_empty() {
+            eprint!(
+                "{}",
+                render_diagnostics(&xaml_path.display().to_string(), &xaml_src, &diags)
+            );
+            if diags.iter().any(|d| d.severity == Severity::Error) {
+                std::process::exit(1);
+            }
+        }
+        // Setter values join the attribute set here (local values win); the
+        // renderer renders the resolved tree unchanged.
+        let resolved = resolve_styles(&tree, &resources, theme);
         let bounds = Bounds::centered(None, size(px(720.), px(480.)), cx);
+        let demo = cx.new(|_| DemoApp {
+            tree: resolved,
+            state: AppState::default(),
+            handlers: handlers.clone(),
+            resources,
+            theme,
+            load_theme: theme,
+            backdrop,
+        });
+        // Live OS theme switch: re-resolve {ThemeResource} without touching
+        // the window; {StaticResource} stays at load_theme.
+        let appearance_watch = demo.downgrade();
+        let view = demo.clone();
         let _window = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -203,18 +210,46 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|_| DemoApp {
-                    tree: resolved,
-                    state: AppState::default(),
-                    handlers: handlers.clone(),
-                    resources,
-                    theme,
-                    backdrop,
-                })
+            move |window, _cx| {
+                let watch = appearance_watch.clone();
+                window
+                    .observe_window_appearance(move |window, cx| {
+                        let appearance_theme = app_theme(window.appearance());
+                        let _ = watch.update(cx, |app, cx| {
+                            if app.theme != appearance_theme {
+                                app.theme = appearance_theme;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                view.clone()
             },
         );
         cx.activate(true);
+
+        // Evidence seam for REQ-TOK-05: flip the theme mid-run through the
+        // same update/notify path the OS appearance callback takes.
+        let flip_watch = demo.downgrade();
+        if let Ok(secs) = std::env::var("POC_FLIP_THEME_SECS")
+            && let Ok(secs) = secs.parse::<u64>()
+        {
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(secs))
+                    .await;
+                cx.update(|cx| {
+                    let _ = flip_watch.update(cx, |app, cx| {
+                        app.theme = match app.theme {
+                            Theme::Dark => Theme::Light,
+                            _ => Theme::Dark,
+                        };
+                        cx.notify();
+                    });
+                });
+            })
+            .detach();
+        }
 
         if let Ok(secs) = std::env::var("POC_AUTOCLOSE_SECS")
             && let Ok(secs) = secs.parse::<u64>()
@@ -248,11 +283,11 @@ mod tests {
     }
 
     #[test]
-    fn theme_names_parse() {
-        assert_eq!(theme_from_name("Light"), Ok(Theme::Light));
-        assert_eq!(theme_from_name(" Dark "), Ok(Theme::Dark));
-        assert_eq!(theme_from_name("HighContrast"), Ok(Theme::HighContrast));
-        assert!(theme_from_name("midnight").is_err());
+    fn os_appearance_maps_to_dialect_themes() {
+        assert_eq!(app_theme(WindowAppearance::Light), Theme::Light);
+        assert_eq!(app_theme(WindowAppearance::VibrantLight), Theme::Light);
+        assert_eq!(app_theme(WindowAppearance::Dark), Theme::Dark);
+        assert_eq!(app_theme(WindowAppearance::VibrantDark), Theme::Dark);
     }
 
     #[test]
@@ -280,6 +315,7 @@ mod tests {
             handlers: demo_handlers(),
             resources: ResourceSet::default(),
             theme: Theme::Dark,
+            load_theme: Theme::Dark,
             backdrop: WindowBackgroundAppearance::Opaque,
         };
         // Arc clone: the call takes &mut app while the handler stays alive.
